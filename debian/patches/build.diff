@@ -1,0 +1,56 @@
+--- mesa-10.4.orig/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
++++ mesa-10.4/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
+@@ -55,7 +55,9 @@
+ #include <llvm/Target/TargetOptions.h>
+ #include <llvm/ExecutionEngine/ExecutionEngine.h>
+ #include <llvm/ADT/Triple.h>
++#if HAVE_LLVM < 0x0306
+ #include <llvm/ExecutionEngine/JITMemoryManager.h>
++#endif
+ #include <llvm/Support/CommandLine.h>
+ #include <llvm/Support/Host.h>
+ #include <llvm/Support/PrettyStackTrace.h>
+@@ -143,6 +145,7 @@ lp_set_store_alignment(LLVMValueRef Inst
+    llvm::unwrap<llvm::StoreInst>(Inst)->setAlignment(Align);
+ }
+ 
++#if HAVE_LLVM < 0x0306
+ 
+ /*
+  * Delegating is tedious but the default manager class is hidden in an
+@@ -398,6 +401,7 @@ class ShaderMemoryManager : public Deleg
+ llvm::JITMemoryManager *ShaderMemoryManager::TheMM = 0;
+ unsigned ShaderMemoryManager::NumUsers = 0;
+ 
++#endif
+ 
+ /**
+  * Same as LLVMCreateJITCompilerForModule, but:
+@@ -420,6 +424,11 @@ lp_build_create_jit_compiler_for_module(
+ {
+    using namespace llvm;
+ 
++#if HAVE_LLVM >= 0x0306
++   *OutError = strdup("MCJIT not supported");
++   return 1;
++#else
++
+    std::string Error;
+ #if HAVE_LLVM >= 0x0306
+    EngineBuilder builder(std::unique_ptr<Module>(unwrap(M)));
+@@ -528,6 +537,7 @@ lp_build_create_jit_compiler_for_module(
+    delete MM;
+    *OutError = strdup(Error.c_str());
+    return 1;
++#endif
+ }
+ 
+ 
+@@ -535,5 +545,7 @@ extern "C"
+ void
+ lp_free_generated_code(struct lp_generated_code *code)
+ {
++#if HAVE_LLVM < 0x0306
+    ShaderMemoryManager::freeGeneratedCode(code);
++#endif
+ }

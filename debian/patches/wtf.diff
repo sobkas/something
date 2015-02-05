@@ -1,0 +1,13 @@
+diff --git a/configure.ac b/configure.ac
+index 3f75266..1fc7e17 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1875,7 +1875,7 @@ if test "x$MESA_LLVM" != x0; then
+ 
+     if test "x$with_llvm_shared_libs" = xyes; then
+         dnl We can't use $LLVM_VERSION because it has 'svn' stripped out,
+-        LLVM_SO_NAME=LLVM-`$LLVM_CONFIG --version`
++        LLVM_SO_NAME=LLVM-`$LLVM_CONFIG --version|head -c3`
+         AS_IF([test -f "$LLVM_LIBDIR/lib$LLVM_SO_NAME.so"], [llvm_have_one_so=yes])
+ 
+         if test "x$llvm_have_one_so" = xyes; then

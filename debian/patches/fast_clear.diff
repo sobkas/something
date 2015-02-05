@@ -1,0 +1,139 @@
+ src/gallium/drivers/r600/evergreen_state.c |  9 ++++-
+ src/gallium/drivers/r600/r600_blit.c       | 64 ++++++++++++++++++++++++++++++
+ src/gallium/drivers/r600/r600_resource.h   |  2 +
+ 3 files changed, 73 insertions(+), 2 deletions(-)
+
+diff --git a/src/gallium/drivers/r600/evergreen_state.c b/src/gallium/drivers/r600/evergreen_state.c
+index 689745f..f9e35e4 100644
+--- a/src/gallium/drivers/r600/evergreen_state.c
++++ b/src/gallium/drivers/r600/evergreen_state.c
+@@ -1853,7 +1853,7 @@ static void evergreen_set_framebuffer_state(struct pipe_context *ctx,
+ 	}
+ 
+ 	/* Colorbuffers. */
+-	rctx->framebuffer.atom.num_dw += state->nr_cbufs * 21;
++	rctx->framebuffer.atom.num_dw += state->nr_cbufs * 25;
+ 	if (rctx->keep_tiling_flags)
+ 		rctx->framebuffer.atom.num_dw += state->nr_cbufs * 2;
+ 	rctx->framebuffer.atom.num_dw += (12 - state->nr_cbufs) * 3;
+@@ -2173,12 +2173,13 @@ static void evergreen_emit_framebuffer_state(struct r600_context *rctx, struct r
+ 	/* Colorbuffers. */
+ 	for (i = 0; i < nr_cbufs; i++) {
+ 		struct r600_surface *cb = (struct r600_surface*)state->cbufs[i];
++		struct r600_texture *tex = (struct r600_texture *)cb->base.texture;
+ 		unsigned reloc = r600_context_bo_reloc(rctx,
+ 						       &rctx->rings.gfx,
+ 						       (struct r600_resource*)cb->base.texture,
+ 						       RADEON_USAGE_READWRITE);
+ 
+-		r600_write_context_reg_seq(cs, R_028C60_CB_COLOR0_BASE + i * 0x3C, 11);
++		r600_write_context_reg_seq(cs, R_028C60_CB_COLOR0_BASE + i * 0x3C, 15);
+ 		r600_write_value(cs, cb->cb_color_base);	/* R_028C60_CB_COLOR0_BASE */
+ 		r600_write_value(cs, cb->cb_color_pitch);	/* R_028C64_CB_COLOR0_PITCH */
+ 		r600_write_value(cs, cb->cb_color_slice);	/* R_028C68_CB_COLOR0_SLICE */
+@@ -2190,6 +2191,10 @@ static void evergreen_emit_framebuffer_state(struct r600_context *rctx, struct r
+ 		r600_write_value(cs, cb->cb_color_cmask_slice);	/* R_028C80_CB_COLOR0_CMASK_SLICE */
+ 		r600_write_value(cs, cb->cb_color_fmask);	/* R_028C84_CB_COLOR0_FMASK */
+ 		r600_write_value(cs, cb->cb_color_fmask_slice); /* R_028C88_CB_COLOR0_FMASK_SLICE */
++		r600_write_value(cs, tex->color_clear_value[0]); /* R_028C8C_CB_COLOR0_CLEAR_WORD0 */
++		r600_write_value(cs, tex->color_clear_value[1]); /* R_028C90_CB_COLOR0_CLEAR_WORD1 */
++		r600_write_value(cs, tex->color_clear_value[2]); /* R_028C94_CB_COLOR0_CLEAR_WORD2 */
++		r600_write_value(cs, tex->color_clear_value[3]); /* R_028C98_CB_COLOR0_CLEAR_WORD3 */
+ 
+ 		r600_write_value(cs, PKT3(PKT3_NOP, 0, 0)); /* R_028C60_CB_COLOR0_BASE */
+ 		r600_write_value(cs, reloc);
+diff --git a/src/gallium/drivers/r600/r600_blit.c b/src/gallium/drivers/r600/r600_blit.c
+index 058bf81..471ee69 100644
+--- a/src/gallium/drivers/r600/r600_blit.c
++++ b/src/gallium/drivers/r600/r600_blit.c
+@@ -412,6 +412,55 @@ static boolean is_simple_msaa_resolve(const struct pipe_blit_info *info)
+ 		dst_tile_mode >= RADEON_SURF_MODE_1D;
+ }
+ 
++static void r600_clear_buffer(struct pipe_context *ctx, struct pipe_resource *dst,
++			      unsigned offset, unsigned size, unsigned char value);
++
++static void eg_set_clear_color(struct pipe_context *ctx,
++			       struct pipe_surface *cbuf,
++			       const union pipe_color_union *color)
++{
++	struct r600_context *rctx = (struct r600_context *)ctx;
++	struct pipe_framebuffer_state *fb = &rctx->framebuffer.state;
++	unsigned *clear_value = ((struct r600_texture *)cbuf->texture)->color_clear_value;
++	union util_color uc;
++
++	memset(&uc, 0, sizeof(uc));
++	util_pack_color(color->f, fb->cbufs[0]->format, &uc);
++	memcpy(clear_value, &uc, sizeof(uc.f));
++}
++
++static bool can_fast_clear_color(struct pipe_context *ctx)
++{
++	struct r600_context *rctx = (struct r600_context *)ctx;
++	struct pipe_framebuffer_state *fb = &rctx->framebuffer.state;
++	int i;
++
++	if (rctx->chip_class < EVERGREEN) {
++		return false;
++	}
++
++	for (i = 0; i < fb->nr_cbufs; i++) {
++		struct r600_texture *tex = (struct r600_texture *)fb->cbufs[i]->texture;
++		const struct util_format_description *desc = util_format_description(fb->cbufs[i]->format);
++
++		if (tex->cmask_size == 0) {
++			return false;
++		}
++
++		/* cannot pack color, needs support in u_format */
++		if (desc->pack_rgba_float == NULL) {
++			return false;
++		}
++
++		/* array textures (and cubemaps) are not supported */
++		if (tex->surface.array_size != 1) {
++			return false;
++		}
++	}
++
++	return true;
++}
++
+ static void r600_clear(struct pipe_context *ctx, unsigned buffers,
+ 		       const union pipe_color_union *color,
+ 		       double depth, unsigned stencil)
+@@ -419,6 +468,21 @@ static void r600_clear(struct pipe_context *ctx, unsigned buffers,
+ 	struct r600_context *rctx = (struct r600_context *)ctx;
+ 	struct pipe_framebuffer_state *fb = &rctx->framebuffer.state;
+ 
++	/* fast color clear on AA framebuffers (EG+) */
++	if ((buffers & PIPE_CLEAR_COLOR) && can_fast_clear_color(ctx)) {
++		int i;
++
++		for (i = 0; i < fb->nr_cbufs; i++) {
++			struct r600_texture *tex = (struct r600_texture *)fb->cbufs[i]->texture;
++			eg_set_clear_color(ctx, fb->cbufs[i], color);
++			r600_clear_buffer(ctx, fb->cbufs[i]->texture,
++					tex->cmask_offset, tex->cmask_size, 0);
++		}
++
++		buffers &= ~PIPE_CLEAR_COLOR;
++		rctx->framebuffer.atom.dirty = true;
++	}
++
+ 	/* if hyperz enabled just clear hyperz */
+ 	if (fb->zsbuf && (buffers & PIPE_CLEAR_DEPTH)) {
+ 		struct r600_texture *rtex;
+diff --git a/src/gallium/drivers/r600/r600_resource.h b/src/gallium/drivers/r600/r600_resource.h
+index d5df633..65d3d9a 100644
+--- a/src/gallium/drivers/r600/r600_resource.h
++++ b/src/gallium/drivers/r600/r600_resource.h
+@@ -91,6 +91,8 @@ struct r600_texture {
+ 	struct r600_resource		*htile;
+ 	/* use htile only for first level */
+ 	float				depth_clear;
++
++	unsigned			color_clear_value[4];
+ };
+ 
+ #define R600_TEX_IS_TILED(tex, level) ((tex)->array_mode[level] != V_038000_ARRAY_LINEAR_GENERAL && (tex)->array_mode[level] != V_038000_ARRAY_LINEAR_ALIGNED)

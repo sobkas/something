@@ -1,0 +1,52 @@
+diff --git a/src/mesa/main/teximage.c b/src/mesa/main/teximage.c
+index 6c8bb85..bd2a9d0 100644
+--- a/src/mesa/main/teximage.c
++++ b/src/mesa/main/teximage.c
+@@ -1933,6 +1933,36 @@ texture_error_check( struct gl_context *ctx,
+    return GL_FALSE;
+ }
+ 
++/**
++ *Hack, fixes compressed texture size, most likley breaks everything else.
++ */
++static void
++compressed_texture_fix_size(struct gl_context *ctx, GLenum target, 
++                            GLenum internalFormat,
++                            GLsizei *width, GLsizei *height)
++{
++      GLenum choose_format;
++      GLenum choose_type;
++      GLenum proxy_format;
++      
++      choose_format = GL_NONE;
++      choose_type = GL_NONE;
++      proxy_format = internalFormat;
++
++      
++      gl_format texFormat =
++         ctx->Driver.ChooseTextureFormat(ctx, target, proxy_format,
++					 choose_format, choose_type);
++      GLuint bw, bh;
++
++      _mesa_get_format_block_size(texFormat, &bw, &bh);
++      
++      if (*width > bw && *width % bw > 0)
++         *width = (*width / bw) * bw;
++      
++      if (*height > bh && *height % bh > 0) 
++         *height = (*height / bh) * bh;    
++}
+ 
+ /**
+  * Error checking for glCompressedTexImage[123]D().
+@@ -2752,6 +2782,10 @@ teximage(struct gl_context *ctx, GLboolean compressed, GLuint dims,
+                                          width, height, depth,
+                                          border, imageSize))
+          return;
++
++         /*Hack*/
++         compressed_texture_fix_size(ctx, target, internalFormat, 
++                                     &width, &height);
+    }
+    else {
+       if (texture_error_check(ctx, dims, target, level, internalFormat,

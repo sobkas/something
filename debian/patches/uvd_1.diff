@@ -1,0 +1,85 @@
+diff --git a/src/gallium/winsys/radeon/drm/radeon_drm_cs.c b/src/gallium/winsys/radeon/drm/radeon_drm_cs.c
+index aa7e295..720e086 100644
+--- a/src/gallium/winsys/radeon/drm/radeon_drm_cs.c
++++ b/src/gallium/winsys/radeon/drm/radeon_drm_cs.c
+@@ -94,6 +94,10 @@
+ #define RADEON_CS_RING_DMA          2
+ #endif
+ 
++#ifndef RADEON_CS_RING_UVD
++#define RADEON_CS_RING_UVD          3
++#endif
++
+ #ifndef RADEON_CS_END_OF_FRAME
+ #define RADEON_CS_END_OF_FRAME      0x04
+ #endif
+@@ -490,6 +494,13 @@ static void radeon_drm_cs_flush(struct radeon_winsys_cs *rcs, unsigned flags)
+                 cs->cst->flags[0] |= RADEON_CS_USE_VM;
+             }
+             break;
++
++        case RING_UVD:
++            cs->cst->flags[0] = 0;
++            cs->cst->flags[1] = RADEON_CS_RING_UVD;
++            cs->cst->cs.num_chunks = 3;
++            break;
++
+         default:
+         case RING_GFX:
+             cs->cst->flags[0] = 0;
+diff --git a/src/gallium/winsys/radeon/drm/radeon_drm_winsys.c b/src/gallium/winsys/radeon/drm/radeon_drm_winsys.c
+index d1f7643..a378878 100644
+--- a/src/gallium/winsys/radeon/drm/radeon_drm_winsys.c
++++ b/src/gallium/winsys/radeon/drm/radeon_drm_winsys.c
+@@ -90,6 +90,14 @@
+ #define RADEON_INFO_TIMESTAMP 0x11
+ #endif
+ 
++#ifndef RADEON_INFO_RING_WORKING
++#define RADEON_INFO_RING_WORKING 0x14
++#endif
++
++#ifndef RADEON_CS_RING_UVD
++#define RADEON_CS_RING_UVD	3
++#endif
++
+ static struct util_hash_table *fd_tab = NULL;
+ 
+ /* Enable/disable feature access for one command stream.
+@@ -323,6 +331,15 @@ static boolean do_winsys_init(struct radeon_drm_winsys *ws)
+         ws->info.r600_has_dma = TRUE;
+     }
+ 
++    /* Check for UVD */
++    ws->info.has_uvd = FALSE;
++    if (ws->info.drm_minor >= 30) {
++	uint32_t value = RADEON_CS_RING_UVD;
++        if (radeon_get_drm_value(ws->fd, RADEON_INFO_RING_WORKING,
++                                 "UVD Ring working", &value))
++            ws->info.has_uvd = value;
++    }
++
+     /* Get GEM info. */
+     retval = drmCommandWriteRead(ws->fd, DRM_RADEON_GEM_INFO,
+             &gem_info, sizeof(gem_info));
+diff --git a/src/gallium/winsys/radeon/drm/radeon_winsys.h b/src/gallium/winsys/radeon/drm/radeon_winsys.h
+index 36f1f8e..e343188 100644
+--- a/src/gallium/winsys/radeon/drm/radeon_winsys.h
++++ b/src/gallium/winsys/radeon/drm/radeon_winsys.h
+@@ -142,6 +142,7 @@ enum chip_class {
+ enum ring_type {
+     RING_GFX = 0,
+     RING_DMA,
++    RING_UVD,
+     RING_LAST,
+ };
+ 
+@@ -170,6 +171,8 @@ struct radeon_info {
+     uint32_t                    drm_minor;
+     uint32_t                    drm_patchlevel;
+ 
++    boolean                     has_uvd;
++
+     uint32_t                    r300_num_gb_pipes;
+     uint32_t                    r300_num_z_pipes;
+ 

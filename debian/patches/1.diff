@@ -1,0 +1,499 @@
+This bring r600g allmost inline with closed source driver when
+it comes to flushing and synchronization pattern.
+
+v2-v4: history lost somewhere in outer space
+v5: Fix compute size of flushing, use define for flags, update
+    worst case cs size requirement for flush, treat rs780 and
+    newer as r7xx when it comes to streamout.
+
+Signed-off-by: Jerome Glisse <jglisse@redhat.com>
+---
+ src/gallium/drivers/r600/evergreen_compute.c       |   8 +-
+ .../drivers/r600/evergreen_compute_internal.c      |   4 +-
+ src/gallium/drivers/r600/evergreen_state.c         |   4 +-
+ src/gallium/drivers/r600/r600.h                    |  16 +-
+ src/gallium/drivers/r600/r600_hw_context.c         | 174 ++++++---------------
+ src/gallium/drivers/r600/r600_hw_context_priv.h    |   2 +-
+ src/gallium/drivers/r600/r600_state.c              |  18 ++-
+ src/gallium/drivers/r600/r600_state_common.c       |  19 +--
+ 8 files changed, 84 insertions(+), 161 deletions(-)
+
+diff --git a/src/gallium/drivers/r600/evergreen_compute.c b/src/gallium/drivers/r600/evergreen_compute.c
+index 66b0cc6..ea75d80 100644
+--- a/src/gallium/drivers/r600/evergreen_compute.c
++++ b/src/gallium/drivers/r600/evergreen_compute.c
+@@ -98,7 +98,7 @@ static void evergreen_cs_set_vertex_buffer(
+ 
+ 	/* The vertex instructions in the compute shaders use the texture cache,
+ 	 * so we need to invalidate it. */
+-	rctx->flags |= R600_CONTEXT_TEX_FLUSH;
++	rctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ 	state->enabled_mask |= 1 << vb_index;
+ 	state->dirty_mask |= 1 << vb_index;
+ 	state->atom.dirty = true;
+@@ -329,7 +329,7 @@ static void compute_emit_cs(struct r600_context *ctx, const uint *block_layout,
+ 	 */
+ 	r600_emit_command_buffer(ctx->cs, &ctx->start_compute_cs_cmd);
+ 
+-	ctx->flags |= R600_CONTEXT_CB_FLUSH;
++	ctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 	r600_flush_emit(ctx);
+ 
+ 	/* Emit colorbuffers. */
+@@ -409,7 +409,7 @@ static void compute_emit_cs(struct r600_context *ctx, const uint *block_layout,
+ 
+ 	/* XXX evergreen_flush_emit() hardcodes the CP_COHER_SIZE to 0xffffffff
+ 	 */
+-	ctx->flags |= R600_CONTEXT_CB_FLUSH;
++	ctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ 	r600_flush_emit(ctx);
+ 
+ #if 0
+@@ -468,7 +468,7 @@ void evergreen_emit_cs_shader(
+ 	r600_write_value(cs, r600_context_bo_reloc(rctx, kernel->code_bo,
+ 							RADEON_USAGE_READ));
+ 
+-	rctx->flags |= R600_CONTEXT_SHADERCONST_FLUSH;
++	rctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ }
+ 
+ static void evergreen_launch_grid(
+diff --git a/src/gallium/drivers/r600/evergreen_compute_internal.c b/src/gallium/drivers/r600/evergreen_compute_internal.c
+index f7aebf2..94f556f 100644
+--- a/src/gallium/drivers/r600/evergreen_compute_internal.c
++++ b/src/gallium/drivers/r600/evergreen_compute_internal.c
+@@ -545,7 +545,7 @@ void evergreen_set_tex_resource(
+ 			     util_format_get_blockwidth(tmp->resource.b.b.format) *
+ 			     view->base.texture->width0*height*depth;
+ 
+-	pipe->ctx->flags |= R600_CONTEXT_TEX_FLUSH;
++	pipe->ctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ 
+ 	evergreen_emit_force_reloc(res);
+ 	evergreen_emit_force_reloc(res);
+@@ -604,7 +604,7 @@ void evergreen_set_const_cache(
+ 	res->usage = RADEON_USAGE_READ;
+ 	res->coher_bo_size = size;
+ 
+-	pipe->ctx->flags |= R600_CONTEXT_SHADERCONST_FLUSH;
++	pipe->ctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ }
+ 
+ struct r600_resource* r600_compute_buffer_alloc_vram(
+diff --git a/src/gallium/drivers/r600/evergreen_state.c b/src/gallium/drivers/r600/evergreen_state.c
+index 996c1b4..58964c4 100644
+--- a/src/gallium/drivers/r600/evergreen_state.c
++++ b/src/gallium/drivers/r600/evergreen_state.c
+@@ -1557,14 +1557,14 @@ static void evergreen_set_framebuffer_state(struct pipe_context *ctx,
+ 	uint32_t i, log_samples;
+ 
+ 	if (rctx->framebuffer.state.nr_cbufs) {
+-		rctx->flags |= R600_CONTEXT_CB_FLUSH;
++		rctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 
+ 		if (rctx->framebuffer.state.cbufs[0]->texture->nr_samples > 1) {
+ 			rctx->flags |= R600_CONTEXT_FLUSH_AND_INV_CB_META;
+ 		}
+ 	}
+ 	if (rctx->framebuffer.state.zsbuf) {
+-		rctx->flags |= R600_CONTEXT_DB_FLUSH;
++		rctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 	}
+ 
+ 	util_copy_framebuffer_state(&rctx->framebuffer.state, state);
+diff --git a/src/gallium/drivers/r600/r600.h b/src/gallium/drivers/r600/r600.h
+index d15cd52..c351982 100644
+--- a/src/gallium/drivers/r600/r600.h
++++ b/src/gallium/drivers/r600/r600.h
+@@ -182,17 +182,11 @@ struct r600_so_target {
+ 	unsigned		so_index;
+ };
+ 
+-#define R600_CONTEXT_PS_PARTIAL_FLUSH		(1 << 0)
+-#define R600_CONTEXT_CB_FLUSH			(1 << 1)
+-#define R600_CONTEXT_DB_FLUSH			(1 << 2)
+-#define R600_CONTEXT_SHADERCONST_FLUSH		(1 << 3)
+-#define R600_CONTEXT_TEX_FLUSH			(1 << 4)
+-#define R600_CONTEXT_VTX_FLUSH			(1 << 5)
+-#define R600_CONTEXT_STREAMOUT_FLUSH		(1 << 6)
+-#define R600_CONTEXT_WAIT_IDLE			(1 << 7)
+-#define R600_CONTEXT_FLUSH_AND_INV		(1 << 8)
+-#define R600_CONTEXT_HTILE_ERRATA		(1 << 9)
+-#define R600_CONTEXT_FLUSH_AND_INV_CB_META	(1 << 10)
++#define R600_CONTEXT_GPU_FLUSH			(1 << 0)
++#define R600_CONTEXT_STREAMOUT_FLUSH		(1 << 1)
++#define R600_CONTEXT_WAIT_IDLE			(1 << 2)
++#define R600_CONTEXT_FLUSH_AND_INV		(1 << 3)
++#define R600_CONTEXT_FLUSH_AND_INV_CB_META	(1 << 4)
+ 
+ struct r600_context;
+ struct r600_screen;
+diff --git a/src/gallium/drivers/r600/r600_hw_context.c b/src/gallium/drivers/r600/r600_hw_context.c
+index c7a357e..e67f8d1 100644
+--- a/src/gallium/drivers/r600/r600_hw_context.c
++++ b/src/gallium/drivers/r600/r600_hw_context.c
+@@ -424,7 +424,7 @@ void r600_context_dirty_block(struct r600_context *ctx,
+ 		LIST_ADDTAIL(&block->list,&ctx->dirty);
+ 
+ 		if (block->flags & REG_FLAG_FLUSH_CHANGE) {
+-			ctx->flags |= R600_CONTEXT_PS_PARTIAL_FLUSH;
++			ctx->flags |= R600_CONTEXT_WAIT_IDLE;
+ 		}
+ 	}
+ }
+@@ -595,16 +595,13 @@ out:
+ void r600_flush_emit(struct r600_context *rctx)
+ {
+ 	struct radeon_winsys_cs *cs = rctx->cs;
++	unsigned cp_coher_cntl = 0;
++	unsigned emit_flush = 0;
+ 
+ 	if (!rctx->flags) {
+ 		return;
+ 	}
+ 
+-	if (rctx->flags & R600_CONTEXT_PS_PARTIAL_FLUSH) {
+-		cs->buf[cs->cdw++] = PKT3(PKT3_EVENT_WRITE, 0, 0);
+-		cs->buf[cs->cdw++] = EVENT_TYPE(EVENT_TYPE_PS_PARTIAL_FLUSH) | EVENT_INDEX(4);
+-	}
+-
+ 	if (rctx->chip_class >= R700 &&
+ 	    (rctx->flags & R600_CONTEXT_FLUSH_AND_INV_CB_META)) {
+ 		cs->buf[cs->cdw++] = PKT3(PKT3_EVENT_WRITE, 0, 0);
+@@ -614,110 +611,53 @@ void r600_flush_emit(struct r600_context *rctx)
+ 	if (rctx->flags & R600_CONTEXT_FLUSH_AND_INV) {
+ 		cs->buf[cs->cdw++] = PKT3(PKT3_EVENT_WRITE, 0, 0);
+ 		cs->buf[cs->cdw++] = EVENT_TYPE(EVENT_TYPE_CACHE_FLUSH_AND_INV_EVENT) | EVENT_INDEX(0);
+-
+-		/* DB flushes are special due to errata with hyperz, we need to
+-		 * insert a no-op, so that the cache has time to really flush.
+-		 */
+-		if (rctx->chip_class <= R700 &&
+-		    rctx->flags & R600_CONTEXT_HTILE_ERRATA) {
+-			cs->buf[cs->cdw++] = PKT3(PKT3_NOP, 31, 0);
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
+-			cs->buf[cs->cdw++] = 0xdeadcafe;
++		if (rctx->chip_class >= EVERGREEN) {
++			cp_coher_cntl = 0x1e97ffc0;
++			cp_coher_cntl = S_0085F0_CB0_DEST_BASE_ENA(1) |
++					S_0085F0_CB1_DEST_BASE_ENA(1) |
++					S_0085F0_CB2_DEST_BASE_ENA(1) |
++					S_0085F0_CB3_DEST_BASE_ENA(1) |
++					S_0085F0_CB4_DEST_BASE_ENA(1) |
++					S_0085F0_CB5_DEST_BASE_ENA(1) |
++					S_0085F0_CB6_DEST_BASE_ENA(1) |
++					S_0085F0_CB7_DEST_BASE_ENA(1) |
++					S_0085F0_CB8_DEST_BASE_ENA(1) |
++					S_0085F0_CB9_DEST_BASE_ENA(1) |
++					S_0085F0_CB10_DEST_BASE_ENA(1) |
++					S_0085F0_CB11_DEST_BASE_ENA(1) |
++					S_0085F0_DB_DEST_BASE_ENA(1) |
++					S_0085F0_TC_ACTION_ENA(1) |
++					S_0085F0_CB_ACTION_ENA(1) |
++					S_0085F0_DB_ACTION_ENA(1) |
++					S_0085F0_SH_ACTION_ENA(1) |
++					S_0085F0_SMX_ACTION_ENA(1) |
++					(1 << 20); /* unknown bit */
++		} else {
++			cp_coher_cntl = S_0085F0_SMX_ACTION_ENA(1) |
++					S_0085F0_SH_ACTION_ENA(1) |
++					S_0085F0_VC_ACTION_ENA(1) |
++					S_0085F0_TC_ACTION_ENA(1) |
++					(1 << 20); /* unknown bit */
+ 		}
+ 	}
+ 
+-	if (rctx->flags & (R600_CONTEXT_CB_FLUSH |
+-			   R600_CONTEXT_DB_FLUSH |
+-		           R600_CONTEXT_SHADERCONST_FLUSH |
+-		           R600_CONTEXT_TEX_FLUSH |
+-		           R600_CONTEXT_VTX_FLUSH |
+-		           R600_CONTEXT_STREAMOUT_FLUSH)) {
+-		/* anything left (cb, vtx, shader, streamout) can be flushed
+-		 * using the surface sync packet
+-		 */
+-		unsigned flags = 0;
+-
+-		if (rctx->flags & R600_CONTEXT_CB_FLUSH) {
+-			flags |= S_0085F0_CB_ACTION_ENA(1) |
+-				 S_0085F0_CB0_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB1_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB2_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB3_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB4_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB5_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB6_DEST_BASE_ENA(1) |
+-				 S_0085F0_CB7_DEST_BASE_ENA(1);
+-
+-			if (rctx->chip_class >= EVERGREEN) {
+-				flags |= S_0085F0_CB8_DEST_BASE_ENA(1) |
+-					 S_0085F0_CB9_DEST_BASE_ENA(1) |
+-					 S_0085F0_CB10_DEST_BASE_ENA(1) |
+-					 S_0085F0_CB11_DEST_BASE_ENA(1);
+-			}
+-
+-			/* RV670 errata
+-			 * (CB1_DEST_BASE_ENA is also required, which is
+-			 * included unconditionally above). */
+-			if (rctx->family == CHIP_RV670 ||
+-			    rctx->family == CHIP_RS780 ||
+-			    rctx->family == CHIP_RS880) {
+-				flags |= S_0085F0_DEST_BASE_0_ENA(1);
+-			}
+-		}
+-
+-		if (rctx->flags & R600_CONTEXT_STREAMOUT_FLUSH) {
+-			flags |= S_0085F0_SO0_DEST_BASE_ENA(1) |
+-				 S_0085F0_SO1_DEST_BASE_ENA(1) |
+-				 S_0085F0_SO2_DEST_BASE_ENA(1) |
+-				 S_0085F0_SO3_DEST_BASE_ENA(1) |
+-				 S_0085F0_SMX_ACTION_ENA(1);
+-
+-			/* RV670 errata */
+-			if (rctx->family == CHIP_RV670 ||
+-			    rctx->family == CHIP_RS780 ||
+-			    rctx->family == CHIP_RS880) {
+-				flags |= S_0085F0_DEST_BASE_0_ENA(1);
+-			}
+-		}
++	if (rctx->flags & R600_CONTEXT_GPU_FLUSH) {
++		cp_coher_cntl |= 0x01900000;
++		emit_flush = 1;
++	}
+ 
+-		flags |= (rctx->flags & R600_CONTEXT_DB_FLUSH) ? S_0085F0_DB_ACTION_ENA(1) |
+-								 S_0085F0_DB_DEST_BASE_ENA(1): 0;
+-		flags |= (rctx->flags & R600_CONTEXT_SHADERCONST_FLUSH) ? S_0085F0_SH_ACTION_ENA(1) : 0;
+-		flags |= (rctx->flags & R600_CONTEXT_TEX_FLUSH) ? S_0085F0_TC_ACTION_ENA(1) : 0;
+-		flags |= (rctx->flags & R600_CONTEXT_VTX_FLUSH) ? S_0085F0_VC_ACTION_ENA(1) : 0;
++	if (rctx->family >= CHIP_RV770 && rctx->flags & R600_CONTEXT_STREAMOUT_FLUSH) {
++		cp_coher_cntl |= S_0085F0_SO0_DEST_BASE_ENA(1) |
++				S_0085F0_SO1_DEST_BASE_ENA(1) |
++				S_0085F0_SO2_DEST_BASE_ENA(1) |
++				S_0085F0_SO3_DEST_BASE_ENA(1) |
++				S_0085F0_SMX_ACTION_ENA(1);
++		emit_flush = 1;
++	}
+ 
++	if (emit_flush) {
+ 		cs->buf[cs->cdw++] = PKT3(PKT3_SURFACE_SYNC, 3, 0);
+-		cs->buf[cs->cdw++] = flags;           /* CP_COHER_CNTL */
++		cs->buf[cs->cdw++] = cp_coher_cntl;   /* CP_COHER_CNTL */
+ 		cs->buf[cs->cdw++] = 0xffffffff;      /* CP_COHER_SIZE */
+ 		cs->buf[cs->cdw++] = 0;               /* CP_COHER_BASE */
+ 		cs->buf[cs->cdw++] = 0x0000000A;      /* POLL_INTERVAL */
+@@ -758,16 +698,10 @@ void r600_context_flush(struct r600_context *ctx, unsigned flags)
+ 		ctx->streamout_suspended = true;
+ 	}
+ 
+-	/* partial flush is needed to avoid lockups on some chips with user fences */
+-	ctx->flags |= R600_CONTEXT_PS_PARTIAL_FLUSH;
+-
+-	/* flush the framebuffer */
+-	ctx->flags |= R600_CONTEXT_CB_FLUSH | R600_CONTEXT_DB_FLUSH;
+-
+-	/* R6xx errata */
+-	if (ctx->chip_class == R600) {
+-		ctx->flags |= R600_CONTEXT_FLUSH_AND_INV;
+-	}
++	/* flush is needed to avoid lockups on some chips with user fences
++	 * this will also flush the framebuffer cache
++	 */
++	ctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 
+ 	r600_flush_emit(ctx);
+ 
+@@ -884,9 +818,7 @@ void r600_context_emit_fence(struct r600_context *ctx, struct r600_resource *fen
+ 	va = r600_resource_va(&ctx->screen->screen, (void*)fence_bo);
+ 	va = va + (offset << 2);
+ 
+-	ctx->flags &= ~R600_CONTEXT_PS_PARTIAL_FLUSH;
+-	cs->buf[cs->cdw++] = PKT3(PKT3_EVENT_WRITE, 0, 0);
+-	cs->buf[cs->cdw++] = EVENT_TYPE(EVENT_TYPE_PS_PARTIAL_FLUSH) | EVENT_INDEX(4);
++	r600_write_config_reg(cs, R_008040_WAIT_UNTIL, S_008040_WAIT_3D_IDLE(1));
+ 
+ 	cs->buf[cs->cdw++] = PKT3(PKT3_EVENT_WRITE_EOP, 4, 0);
+ 	cs->buf[cs->cdw++] = EVENT_TYPE(EVENT_TYPE_CACHE_FLUSH_AND_INV_TS_EVENT) | EVENT_INDEX(5);
+@@ -1073,15 +1005,11 @@ void r600_context_streamout_end(struct r600_context *ctx)
+ 	}
+ 
+ 	if (ctx->chip_class >= EVERGREEN) {
++		ctx->flags |= R600_CONTEXT_STREAMOUT_FLUSH;
+ 		evergreen_set_streamout_enable(ctx, 0);
+ 	} else {
+ 		r600_set_streamout_enable(ctx, 0);
+ 	}
+-	ctx->flags |= R600_CONTEXT_STREAMOUT_FLUSH;
+-
+-	/* R6xx errata */
+-	if (ctx->chip_class == R600) {
+-		ctx->flags |= R600_CONTEXT_FLUSH_AND_INV;
+-	}
++	ctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 	ctx->num_cs_dw_streamout_end = 0;
+ }
+diff --git a/src/gallium/drivers/r600/r600_hw_context_priv.h b/src/gallium/drivers/r600/r600_hw_context_priv.h
+index c59a9ab..050c472 100644
+--- a/src/gallium/drivers/r600/r600_hw_context_priv.h
++++ b/src/gallium/drivers/r600/r600_hw_context_priv.h
+@@ -29,7 +29,7 @@
+ #include "r600_pipe.h"
+ 
+ /* the number of CS dwords for flushing and drawing */
+-#define R600_MAX_FLUSH_CS_DWORDS 46
++#define R600_MAX_FLUSH_CS_DWORDS 12
+ #define R600_MAX_DRAW_CS_DWORDS 34
+ 
+ /* these flags are used in register flags and added into block flags */
+diff --git a/src/gallium/drivers/r600/r600_state.c b/src/gallium/drivers/r600/r600_state.c
+index 9bfae4f..e591d79 100644
+--- a/src/gallium/drivers/r600/r600_state.c
++++ b/src/gallium/drivers/r600/r600_state.c
+@@ -1452,7 +1452,7 @@ static void r600_set_framebuffer_state(struct pipe_context *ctx,
+ 	unsigned i;
+ 
+ 	if (rctx->framebuffer.state.nr_cbufs) {
+-		rctx->flags |= R600_CONTEXT_CB_FLUSH;
++		rctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 
+ 		if (rctx->chip_class >= R700 &&
+ 		    rctx->framebuffer.state.cbufs[0]->texture->nr_samples > 1) {
+@@ -1460,11 +1460,7 @@ static void r600_set_framebuffer_state(struct pipe_context *ctx,
+ 		}
+ 	}
+ 	if (rctx->framebuffer.state.zsbuf) {
+-		rctx->flags |= R600_CONTEXT_DB_FLUSH;
+-	}
+-	/* R6xx errata */
+-	if (rctx->chip_class == R600) {
+-		rctx->flags |= R600_CONTEXT_FLUSH_AND_INV;
++		rctx->flags |= R600_CONTEXT_WAIT_IDLE | R600_CONTEXT_FLUSH_AND_INV;
+ 	}
+ 
+ 	/* Set the new state. */
+@@ -1742,6 +1738,13 @@ static void r600_emit_framebuffer_state(struct r600_context *rctx, struct r600_a
+ 		sbu |= SURFACE_BASE_UPDATE_COLOR_NUM(nr_cbufs);
+ 	}
+ 
++	/* SURFACE_BASE_UPDATE */
++	if (rctx->family > CHIP_R600 && rctx->family < CHIP_RV770 && sbu) {
++		r600_write_value(cs, PKT3(PKT3_SURFACE_BASE_UPDATE, 0, 0));
++		r600_write_value(cs, sbu);
++		sbu = 0;
++	}
++
+ 	/* Zbuffer. */
+ 	if (state->zsbuf) {
+ 		struct r600_surface *surf = (struct r600_surface*)state->zsbuf;
+@@ -1775,6 +1778,7 @@ static void r600_emit_framebuffer_state(struct r600_context *rctx, struct r600_a
+ 	if (rctx->family > CHIP_R600 && rctx->family < CHIP_RV770 && sbu) {
+ 		r600_write_value(cs, PKT3(PKT3_SURFACE_BASE_UPDATE, 0, 0));
+ 		r600_write_value(cs, sbu);
++		sbu = 0;
+ 	}
+ 
+ 	/* Framebuffer dimensions. */
+@@ -2243,7 +2247,7 @@ bool r600_adjust_gprs(struct r600_context *rctx)
+ 	if (rctx->config_state.sq_gpr_resource_mgmt_1 != tmp) {
+ 		rctx->config_state.sq_gpr_resource_mgmt_1 = tmp;
+ 		rctx->config_state.atom.dirty = true;
+-		rctx->flags |= R600_CONTEXT_PS_PARTIAL_FLUSH;
++		rctx->flags |= R600_CONTEXT_WAIT_IDLE;
+ 	}
+ 	return true;
+ }
+diff --git a/src/gallium/drivers/r600/r600_state_common.c b/src/gallium/drivers/r600/r600_state_common.c
+index b20f655..c69149b 100644
+--- a/src/gallium/drivers/r600/r600_state_common.c
++++ b/src/gallium/drivers/r600/r600_state_common.c
+@@ -88,12 +88,9 @@ static void r600_texture_barrier(struct pipe_context *ctx)
+ {
+ 	struct r600_context *rctx = (struct r600_context *)ctx;
+ 
+-	rctx->flags |= R600_CONTEXT_CB_FLUSH | R600_CONTEXT_TEX_FLUSH;
+-
+-	/* R6xx errata */
+-	if (rctx->chip_class == R600) {
+-		rctx->flags |= R600_CONTEXT_FLUSH_AND_INV;
+-	}
++	rctx->flags |= R600_CONTEXT_WAIT_IDLE;
++	rctx->flags |= R600_CONTEXT_GPU_FLUSH;
++	rctx->flags |= R600_CONTEXT_FLUSH_AND_INV;
+ }
+ 
+ static unsigned r600_conv_pipe_prim(unsigned prim)
+@@ -360,7 +357,7 @@ void r600_sampler_states_dirty(struct r600_context *rctx,
+ {
+ 	if (state->dirty_mask) {
+ 		if (state->dirty_mask & state->has_bordercolor_mask) {
+-			rctx->flags |= R600_CONTEXT_PS_PARTIAL_FLUSH;
++			rctx->flags |= R600_CONTEXT_WAIT_IDLE;
+ 		}
+ 		state->atom.num_dw =
+ 			util_bitcount(state->dirty_mask & state->has_bordercolor_mask) * 11 +
+@@ -423,7 +420,7 @@ static void r600_bind_sampler_states(struct pipe_context *pipe,
+ 	    seamless_cube_map != -1 &&
+ 	    seamless_cube_map != rctx->seamless_cube_map.enabled) {
+ 		/* change in TA_CNTL_AUX need a pipeline flush */
+-		rctx->flags |= R600_CONTEXT_PS_PARTIAL_FLUSH;
++		rctx->flags |= R600_CONTEXT_WAIT_IDLE;
+ 		rctx->seamless_cube_map.enabled = seamless_cube_map;
+ 		rctx->seamless_cube_map.atom.dirty = true;
+ 	}
+@@ -491,7 +488,7 @@ static void r600_set_index_buffer(struct pipe_context *ctx,
+ void r600_vertex_buffers_dirty(struct r600_context *rctx)
+ {
+ 	if (rctx->vertex_buffer_state.dirty_mask) {
+-		rctx->flags |= rctx->has_vertex_cache ? R600_CONTEXT_VTX_FLUSH : R600_CONTEXT_TEX_FLUSH;
++		rctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ 		rctx->vertex_buffer_state.atom.num_dw = (rctx->chip_class >= EVERGREEN ? 12 : 11) *
+ 					       util_bitcount(rctx->vertex_buffer_state.dirty_mask);
+ 		rctx->vertex_buffer_state.atom.dirty = true;
+@@ -547,7 +544,7 @@ void r600_sampler_views_dirty(struct r600_context *rctx,
+ 			      struct r600_samplerview_state *state)
+ {
+ 	if (state->dirty_mask) {
+-		rctx->flags |= R600_CONTEXT_TEX_FLUSH;
++		rctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ 		state->atom.num_dw = (rctx->chip_class >= EVERGREEN ? 14 : 13) *
+ 				     util_bitcount(state->dirty_mask);
+ 		state->atom.dirty = true;
+@@ -889,7 +886,7 @@ static void r600_delete_vs_state(struct pipe_context *ctx, void *state)
+ void r600_constant_buffers_dirty(struct r600_context *rctx, struct r600_constbuf_state *state)
+ {
+ 	if (state->dirty_mask) {
+-		rctx->flags |= R600_CONTEXT_SHADERCONST_FLUSH;
++		rctx->flags |= R600_CONTEXT_GPU_FLUSH;
+ 		state->atom.num_dw = rctx->chip_class >= EVERGREEN ? util_bitcount(state->dirty_mask)*20
+ 								   : util_bitcount(state->dirty_mask)*19;
+ 		state->atom.dirty = true;

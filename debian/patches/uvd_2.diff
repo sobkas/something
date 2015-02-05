@@ -1,0 +1,2239 @@
+ configure.ac                                  |    5 +-
+ docs/README.UVD                               |   13 +
+ src/gallium/drivers/Makefile.am               |   10 +-
+ src/gallium/drivers/r600/Makefile.am          |    4 +-
+ src/gallium/drivers/r600/Makefile.sources     |    3 +-
+ src/gallium/drivers/r600/r600_pipe.c          |   21 +-
+ src/gallium/drivers/r600/r600_pipe.h          |   12 +
+ src/gallium/drivers/r600/r600_uvd.c           |  178 ++++
+ src/gallium/drivers/radeon/Makefile.am        |   23 +-
+ src/gallium/drivers/radeon/Makefile.sources   |    7 +-
+ src/gallium/drivers/radeon/radeon_uvd.c       | 1111 +++++++++++++++++++++++++
+ src/gallium/drivers/radeon/radeon_uvd.h       |  377 +++++++++
+ src/gallium/drivers/radeonsi/Makefile.am      |    4 +-
+ src/gallium/drivers/radeonsi/Makefile.sources |    3 +-
+ src/gallium/drivers/radeonsi/radeonsi_pipe.c  |   21 +-
+ src/gallium/drivers/radeonsi/radeonsi_pipe.h  |   11 +
+ src/gallium/drivers/radeonsi/radeonsi_uvd.c   |  160 ++++
+ 17 files changed, 1939 insertions(+), 24 deletions(-)
+ create mode 100644 docs/README.UVD
+ create mode 100644 src/gallium/drivers/r600/r600_uvd.c
+ create mode 100644 src/gallium/drivers/radeon/radeon_uvd.c
+ create mode 100644 src/gallium/drivers/radeon/radeon_uvd.h
+ create mode 100644 src/gallium/drivers/radeonsi/radeonsi_uvd.c
+
+diff --git a/configure.ac b/configure.ac
+index e202e2d..7cdbe67 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1776,6 +1776,7 @@ radeon_llvm_check() {
+                       configure flag])
+     fi
+     LLVM_COMPONENTS="${LLVM_COMPONENTS} r600 bitreader"
++    NEED_RADEON_LLVM=yes
+ }
+ 
+ dnl Gallium drivers
+@@ -1813,7 +1814,6 @@ if test "x$with_gallium_drivers" != x; then
+             GALLIUM_DRIVERS_DIRS="$GALLIUM_DRIVERS_DIRS r600"
+             if test "x$enable_r600_llvm" = xyes -o "x$enable_opencl" = xyes; then
+                 radeon_llvm_check
+-                NEED_RADEON_GALLIUM=yes;
+                 R600_NEED_RADEON_GALLIUM=yes;
+                 LLVM_COMPONENTS="${LLVM_COMPONENTS} ipo bitreader asmparser"
+             fi
+@@ -1831,7 +1831,6 @@ if test "x$with_gallium_drivers" != x; then
+             gallium_require_drm_loader
+             GALLIUM_DRIVERS_DIRS="$GALLIUM_DRIVERS_DIRS radeonsi"
+             radeon_llvm_check
+-	    NEED_RADEON_GALLIUM=yes;
+             gallium_check_st "radeon/drm" "dri-radeonsi" "xorg-radeonsi" "" "" "vdpau-radeonsi" ""
+             ;;
+         xnouveau)
+@@ -1986,7 +1985,7 @@ AM_CONDITIONAL(HAVE_COMMON_DRI, test x$HAVE_COMMON_DRI = xyes)
+ AM_CONDITIONAL(HAVE_GALAHAD_GALLIUM, test x$HAVE_GALAHAD_GALLIUM = xyes)
+ AM_CONDITIONAL(HAVE_IDENTITY_GALLIUM, test x$HAVE_IDENTITY_GALLIUM = xyes)
+ AM_CONDITIONAL(HAVE_NOOP_GALLIUM, test x$HAVE_NOOP_GALLIUM = xyes)
+-AM_CONDITIONAL(NEED_RADEON_GALLIUM, test x$NEED_RADEON_GALLIUM = xyes)
++AM_CONDITIONAL(NEED_RADEON_LLVM, test x$NEED_RADEON_LLVM = xyes)
+ AM_CONDITIONAL(R600_NEED_RADEON_GALLIUM, test x$R600_NEED_RADEON_GALLIUM = xyes)
+ AM_CONDITIONAL(USE_R600_LLVM_COMPILER, test x$USE_R600_LLVM_COMPILER = xyes)
+ AM_CONDITIONAL(HAVE_LOADER_GALLIUM, test x$enable_gallium_loader = xyes)
+diff --git a/docs/README.UVD b/docs/README.UVD
+new file mode 100644
+index 0000000..36b467e
+--- /dev/null
++++ b/docs/README.UVD
+@@ -0,0 +1,13 @@
++The software may implement third party technologies (e.g. third party
++libraries) that are not licensed to you by AMD and for which you may need
++to obtain licenses from other parties.  Unless explicitly stated otherwise,
++these third party technologies are not licensed hereunder.  Such third
++party technologies include, but are not limited, to H.264, MPEG-2, MPEG-4,
++AVC, and VC-1.
++
++For MPEG-2 Encoding Products ANY USE OF THIS PRODUCT IN ANY MANNER OTHER
++THAN PERSONAL USE THAT COMPLIES WITH THE MPEG-2 STANDARD FOR ENCODING VIDEO
++INFORMATION FOR PACKAGED MEDIA IS EXPRESSLY PROHIBITED WITHOUT A LICENSE
++UNDER APPLICABLE PATENTS IN THE MPEG-2 PATENT PORTFOLIO, WHICH LICENSES IS
++AVAILABLE FROM MPEG LA, LLC, 6312 S. Fiddlers Green Circle, Suite 400E,
++Greenwood Village, Colorado 80111 U.S.A.
+diff --git a/src/gallium/drivers/Makefile.am b/src/gallium/drivers/Makefile.am
+index 3477fee..c4dc6bf 100644
+--- a/src/gallium/drivers/Makefile.am
++++ b/src/gallium/drivers/Makefile.am
+@@ -56,10 +56,18 @@ endif
+ 
+ ################################################################################
+ 
+-if NEED_RADEON_GALLIUM
++if HAVE_GALLIUM_R600
+ 
+ SUBDIRS += radeon
+ 
++else
++
++if HAVE_GALLIUM_RADEONSI
++
++SUBDIRS += radeon
++
++endif
++
+ endif
+ 
+ ################################################################################
+diff --git a/src/gallium/drivers/r600/Makefile.am b/src/gallium/drivers/r600/Makefile.am
+index a067f2c..43c8704 100644
+--- a/src/gallium/drivers/r600/Makefile.am
++++ b/src/gallium/drivers/r600/Makefile.am
+@@ -13,12 +13,14 @@ AM_CFLAGS = \
+ libr600_la_SOURCES = \
+ 	$(C_SOURCES)
+ 
++libr600_la_LIBADD = ../radeon/libradeon.la
++
+ if R600_NEED_RADEON_GALLIUM
+ 
+ libr600_la_SOURCES += \
+ 	$(LLVM_C_SOURCES)
+ 
+-libr600_la_LIBADD = ../radeon/libllvmradeon at VERSION@.la
++libr600_la_LIBADD += ../radeon/libllvmradeon at VERSION@.la
+ 
+ AM_CFLAGS += \
+ 	$(LLVM_CFLAGS) \
+diff --git a/src/gallium/drivers/r600/Makefile.sources b/src/gallium/drivers/r600/Makefile.sources
+index b51f274..17ea03b 100644
+--- a/src/gallium/drivers/r600/Makefile.sources
++++ b/src/gallium/drivers/r600/Makefile.sources
+@@ -17,6 +17,7 @@ C_SOURCES = \
+ 	r600_state_common.c \
+ 	evergreen_compute.c \
+ 	evergreen_compute_internal.c \
+-	compute_memory_pool.c
++	compute_memory_pool.c \
++	r600_uvd.c
+ 
+ LLVM_C_SOURCES = r600_llvm.c
+diff --git a/src/gallium/drivers/r600/r600_pipe.c b/src/gallium/drivers/r600/r600_pipe.c
+index 7f308f7..564bff7 100644
+--- a/src/gallium/drivers/r600/r600_pipe.c
++++ b/src/gallium/drivers/r600/r600_pipe.c
+@@ -37,6 +37,7 @@
+ #include "util/u_math.h"
+ #include "vl/vl_decoder.h"
+ #include "vl/vl_video_buffer.h"
++#include "radeon/radeon_uvd.h"
+ #include "os/os_time.h"
+ 
+ static const struct debug_named_value debug_options[] = {
+@@ -379,8 +380,13 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
+ 	r600_init_context_resource_functions(rctx);
+ 	r600_init_surface_functions(rctx);
+ 
+-	rctx->context.create_video_decoder = vl_create_decoder;
+-	rctx->context.create_video_buffer = vl_video_buffer_create;
++	if (rscreen->info.has_uvd) {
++		rctx->context.create_video_decoder = r600_uvd_create_decoder;
++		rctx->context.create_video_buffer = r600_video_buffer_create;
++	} else {
++		rctx->context.create_video_decoder = vl_create_decoder;
++		rctx->context.create_video_buffer = vl_video_buffer_create;
++	}
+ 
+ 	r600_init_common_state_functions(rctx);
+ 
+@@ -1255,7 +1261,6 @@ struct pipe_screen *r600_screen_create(struct radeon_winsys *ws)
+ 	rscreen->screen.get_param = r600_get_param;
+ 	rscreen->screen.get_shader_param = r600_get_shader_param;
+ 	rscreen->screen.get_paramf = r600_get_paramf;
+-	rscreen->screen.get_video_param = r600_get_video_param;
+ 	rscreen->screen.get_compute_param = r600_get_compute_param;
+ 	rscreen->screen.get_timestamp = r600_get_timestamp;
+ 
+@@ -1266,12 +1271,20 @@ struct pipe_screen *r600_screen_create(struct radeon_winsys *ws)
+ 		rscreen->screen.is_format_supported = r600_is_format_supported;
+ 		rscreen->dma_blit = &r600_dma_blit;
+ 	}
+-	rscreen->screen.is_video_format_supported = vl_video_buffer_is_format_supported;
+ 	rscreen->screen.context_create = r600_create_context;
+ 	rscreen->screen.fence_reference = r600_fence_reference;
+ 	rscreen->screen.fence_signalled = r600_fence_signalled;
+ 	rscreen->screen.fence_finish = r600_fence_finish;
+ 	rscreen->screen.get_driver_query_info = r600_get_driver_query_info;
++
++	if (rscreen->info.has_uvd) {
++		rscreen->screen.get_video_param = ruvd_get_video_param;
++		rscreen->screen.is_video_format_supported = ruvd_is_format_supported;
++	} else {
++		rscreen->screen.get_video_param = r600_get_video_param;
++		rscreen->screen.is_video_format_supported = vl_video_buffer_is_format_supported;
++	}
++
+ 	r600_init_screen_resource_functions(&rscreen->screen);
+ 
+ 	util_format_s3tc_init();
+diff --git a/src/gallium/drivers/r600/r600_pipe.h b/src/gallium/drivers/r600/r600_pipe.h
+index de1545e..af70be7 100644
+--- a/src/gallium/drivers/r600/r600_pipe.h
++++ b/src/gallium/drivers/r600/r600_pipe.h
+@@ -885,6 +885,18 @@ unsigned r600_tex_mipfilter(unsigned filter);
+ unsigned r600_tex_compare(unsigned compare);
+ bool sampler_state_needs_border_color(const struct pipe_sampler_state *state);
+ 
++/* r600_uvd.c */
++struct pipe_video_decoder *r600_uvd_create_decoder(struct pipe_context *context,
++                                                   enum pipe_video_profile profile,
++                                                   enum pipe_video_entrypoint entrypoint,
++                                                   enum pipe_video_chroma_format chroma_format,
++                                                   unsigned width, unsigned height,
++						   unsigned max_references, bool expect_chunked_decode);
++
++struct pipe_video_buffer *r600_video_buffer_create(struct pipe_context *pipe,
++						   const struct pipe_video_buffer *tmpl);
++
++
+ /*
+  * Helpers for building command buffers
+  */
+diff --git a/src/gallium/drivers/r600/r600_uvd.c b/src/gallium/drivers/r600/r600_uvd.c
+new file mode 100644
+index 0000000..bdda7e1
+--- /dev/null
++++ b/src/gallium/drivers/r600/r600_uvd.c
+@@ -0,0 +1,178 @@
++/**************************************************************************
++ *
++ * Copyright 2011 Advanced Micro Devices, Inc.
++ * All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sub license, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
++ * IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR
++ * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ **************************************************************************/
++
++/*
++ * Authors:
++ *      Christian König <christian.koenig at amd.com>
++ *
++ */
++
++#include <sys/types.h>
++#include <assert.h>
++#include <errno.h>
++#include <unistd.h>
++
++#include "pipe/p_video_decoder.h"
++
++#include "util/u_memory.h"
++#include "util/u_video.h"
++
++#include "vl/vl_defines.h"
++#include "vl/vl_mpeg12_decoder.h"
++
++#include "r600_pipe.h"
++#include "radeon/radeon_uvd.h"
++#include "r600d.h"
++
++/**
++ * creates an video buffer with an UVD compatible memory layout
++ */
++struct pipe_video_buffer *r600_video_buffer_create(struct pipe_context *pipe,
++						   const struct pipe_video_buffer *tmpl)
++{
++	struct r600_context *ctx = (struct r600_context *)pipe;
++	struct r600_texture *resources[VL_NUM_COMPONENTS] = {};
++	struct radeon_surface* surfaces[VL_NUM_COMPONENTS] = {};
++	struct pb_buffer **pbs[VL_NUM_COMPONENTS] = {};
++	const enum pipe_format *resource_formats;
++	struct pipe_video_buffer template;
++	struct pipe_resource templ;
++	unsigned i, depth;
++
++	assert(pipe);
++
++	/* first create the needed resources as "normal" textures */
++	resource_formats = vl_video_buffer_formats(pipe->screen, tmpl->buffer_format);
++	if (!resource_formats)
++		return NULL;
++
++	depth = tmpl->interlaced ? 2 : 1;
++	template = *tmpl;
++	template.width = align(tmpl->width, VL_MACROBLOCK_WIDTH);
++	template.height = align(tmpl->height / depth, VL_MACROBLOCK_HEIGHT);
++
++	vl_vide_buffer_template(&templ, &template, resource_formats[0], depth, PIPE_USAGE_STATIC, 0);
++	resources[0] = (struct r600_texture *)
++		pipe->screen->resource_create(pipe->screen, &templ);
++	if (!resources[0])
++		goto error;
++
++	if (resource_formats[1] != PIPE_FORMAT_NONE) {
++		vl_vide_buffer_template(&templ, &template, resource_formats[1], depth, PIPE_USAGE_STATIC, 1);
++		resources[1] = (struct r600_texture *)
++			pipe->screen->resource_create(pipe->screen, &templ);
++		if (!resources[1])
++			goto error;
++	}
++
++	if (resource_formats[2] != PIPE_FORMAT_NONE) {
++		vl_vide_buffer_template(&templ, &template, resource_formats[2], depth, PIPE_USAGE_STATIC, 2);
++		resources[2] = (struct r600_texture *)
++			pipe->screen->resource_create(pipe->screen, &templ);
++		if (!resources[2])
++			goto error;
++	}
++
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!resources[i])
++			continue;
++
++		pbs[i] = &resources[i]->resource.buf;
++		surfaces[i] = &resources[i]->surface;
++
++		if (ctx->chip_class < EVERGREEN) {
++			resources[i]->array_mode[0] = V_038000_ARRAY_LINEAR_ALIGNED;
++			resources[i]->surface.level[0].mode = RADEON_SURF_MODE_LINEAR_ALIGNED;
++		}
++	}
++
++	ruvd_join_surfaces(ctx->ws, templ.bind, pbs, surfaces);
++
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!resources[i])
++			continue;
++
++		/* recreate the CS handle */
++		resources[i]->resource.cs_buf = ctx->ws->buffer_get_cs_handle(
++			resources[i]->resource.buf);
++	}
++
++	template.height *= depth;
++	return vl_video_buffer_create_ex2(pipe, &template, (struct pipe_resource **)resources);
++
++error:
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i)
++		pipe_resource_reference((struct pipe_resource **)&resources[i], NULL);
++
++	return NULL;
++}
++
++/* hw encode the number of memory banks */
++static uint32_t eg_num_banks(uint32_t nbanks)
++{
++	switch (nbanks) {
++	case 2:
++		return 0;
++	case 4:
++		return 1;
++	case 8:
++	default:
++		return 2;
++	case 16:
++		return 3;
++	}
++}
++
++/* set the decoding target buffer offsets */
++static struct radeon_winsys_cs_handle* r600_uvd_set_dtb(struct ruvd_msg *msg, struct vl_video_buffer *buf)
++{
++	struct r600_screen *rscreen = (struct r600_screen*)buf->base.context->screen;
++	struct r600_texture *luma = (struct r600_texture *)buf->resources[0];
++	struct r600_texture *chroma = (struct r600_texture *)buf->resources[1];
++
++	msg->decode.dt_field_mode = buf->base.interlaced;
++	msg->decode.dt_surf_tile_config |= RUVD_NUM_BANKS(eg_num_banks(rscreen->tiling_info.num_banks));
++
++	ruvd_set_dt_surfaces(msg, &luma->surface, &chroma->surface);
++
++	return luma->resource.cs_buf;
++}
++
++/* create decoder */
++struct pipe_video_decoder *r600_uvd_create_decoder(struct pipe_context *context,
++						   enum pipe_video_profile profile,
++						   enum pipe_video_entrypoint entrypoint,
++						   enum pipe_video_chroma_format chroma_format,
++						   unsigned width, unsigned height,
++						   unsigned max_references, bool expect_chunked_decode)
++{
++	struct r600_context *ctx = (struct r600_context *)context;
++
++	return ruvd_create_decoder(context, profile, entrypoint, chroma_format,
++			 	   width, height, max_references, expect_chunked_decode,
++				   ctx->ws, r600_uvd_set_dtb);
++}
+diff --git a/src/gallium/drivers/radeon/Makefile.am b/src/gallium/drivers/radeon/Makefile.am
+index 140f6c6..4a39514 100644
+--- a/src/gallium/drivers/radeon/Makefile.am
++++ b/src/gallium/drivers/radeon/Makefile.am
+@@ -3,6 +3,15 @@ include $(top_srcdir)/src/gallium/Automake.inc
+ 
+ LIBGALLIUM_LIBS=
+ 
++noinst_LTLIBRARIES = libradeon.la
++
++AM_CFLAGS = $(GALLIUM_CFLAGS)
++
++libradeon_la_SOURCES = \
++	$(C_SOURCES)
++
++if NEED_RADEON_LLVM
++
+ if HAVE_GALLIUM_R600
+ if HAVE_GALLIUM_RADEONSI
+ lib_LTLIBRARIES = libllvmradeon at VERSION@.la
+@@ -10,26 +19,28 @@ libllvmradeon at VERSION@_la_LDFLAGS = -Wl, -shared -avoid-version \
+ 	$(LLVM_LDFLAGS)
+ LIBGALLIUM_LIBS += $(top_builddir)/src/gallium/auxiliary/libgallium.la
+ else
+-noinst_LTLIBRARIES = libllvmradeon at VERSION@.la
++noinst_LTLIBRARIES += libllvmradeon at VERSION@.la
+ endif
+ else
+-noinst_LTLIBRARIES = libllvmradeon at VERSION@.la
++noinst_LTLIBRARIES += libllvmradeon at VERSION@.la
+ endif
+ 
+-AM_CXXFLAGS = \
++libllvmradeon at VERSION@_la_CXXFLAGS = \
+ 	$(GALLIUM_CFLAGS) \
+ 	$(filter-out -DDEBUG, $(LLVM_CXXFLAGS)) \
+ 	$(DEFINES)
+ 
+-AM_CFLAGS = \
++libllvmradeon at VERSION@_la_CFLAGS = \
+ 	$(GALLIUM_CFLAGS) \
+ 	$(LLVM_CFLAGS)
+ 
+ libllvmradeon at VERSION@_la_SOURCES = \
+-	$(CPP_FILES) \
+-	$(C_FILES)
++	$(LLVM_CPP_FILES) \
++	$(LLVM_C_FILES)
+ 
+ libllvmradeon at VERSION@_la_LIBADD = \
+ 	$(LIBGALLIUM_LIBS) \
+ 	$(CLOCK_LIB) \
+ 	$(LLVM_LIBS)
++
++endif
+diff --git a/src/gallium/drivers/radeon/Makefile.sources b/src/gallium/drivers/radeon/Makefile.sources
+index efe0e6b..a23d5c4 100644
+--- a/src/gallium/drivers/radeon/Makefile.sources
++++ b/src/gallium/drivers/radeon/Makefile.sources
+@@ -1,6 +1,9 @@
+-CPP_FILES := \
++C_SOURCES := \
++	radeon_uvd.c
++
++LLVM_CPP_FILES := \
+ 	radeon_llvm_emit.cpp
+ 
+-C_FILES := \
++LLVM_C_FILES := \
+ 	radeon_setup_tgsi_llvm.c \
+ 	radeon_llvm_util.c
+diff --git a/src/gallium/drivers/radeon/radeon_uvd.c b/src/gallium/drivers/radeon/radeon_uvd.c
+new file mode 100644
+index 0000000..dae7880
+--- /dev/null
++++ b/src/gallium/drivers/radeon/radeon_uvd.c
+@@ -0,0 +1,1111 @@
++/**************************************************************************
++ *
++ * Copyright 2011 Advanced Micro Devices, Inc.
++ * All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sub license, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
++ * IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR
++ * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ **************************************************************************/
++
++/*
++ * Authors:
++ *	Christian König <christian.koenig at amd.com>
++ *
++ */
++
++#include <sys/types.h>
++#include <assert.h>
++#include <errno.h>
++#include <unistd.h>
++#include <stdio.h>
++
++#include "pipe/p_video_decoder.h"
++
++#include "util/u_memory.h"
++#include "util/u_video.h"
++
++#include "vl/vl_defines.h"
++#include "vl/vl_mpeg12_decoder.h"
++
++#include "../../winsys/radeon/drm/radeon_winsys.h"
++#include "radeon_uvd.h"
++
++#define RUVD_ERR(fmt, args...) \
++	fprintf(stderr, "EE %s:%d %s UVD - "fmt, __FILE__, __LINE__, __func__, ##args)
++
++#define NUM_BUFFERS 4
++
++#define NUM_MPEG2_REFS 6
++#define NUM_H264_REFS 17
++
++/* UVD buffer representation */
++struct ruvd_buffer
++{
++	struct pb_buffer*		buf;
++	struct radeon_winsys_cs_handle*	cs_handle;
++};
++
++/* UVD decoder representation */
++struct ruvd_decoder {
++	struct pipe_video_decoder	base;
++
++	ruvd_set_dtb			set_dtb;
++
++	unsigned			stream_handle;
++	unsigned			frame_number;
++
++	struct radeon_winsys*		ws;
++	struct radeon_winsys_cs*	cs;
++
++	unsigned			cur_buffer;
++
++	struct ruvd_buffer		msg_fb_buffers[NUM_BUFFERS];
++	struct ruvd_buffer		bs_buffers[NUM_BUFFERS];
++	void*				bs_ptr;
++	unsigned			bs_size;
++
++	struct ruvd_buffer		dpb;
++};
++
++/* generate an UVD stream handle */
++static unsigned alloc_stream_handle()
++{
++	static unsigned counter = 0;
++	unsigned stream_handle = 0;
++	unsigned pid = getpid();
++	int i;
++
++	for (i = 0; i < 32; ++i)
++		stream_handle |= ((pid >> i) & 1) << (31 - i);
++
++	stream_handle ^= ++counter;
++	return stream_handle;
++}
++
++/* flush IB to the hardware */
++static void flush(struct ruvd_decoder *dec)
++{
++	uint32_t *pm4 =	dec->cs->buf;
++
++	// align IB
++	while(dec->cs->cdw % 16)
++		pm4[dec->cs->cdw++] = RUVD_PKT2();
++
++	dec->ws->cs_flush(dec->cs, 0);
++}
++
++/* add a new set register command to the IB */
++static void set_reg(struct ruvd_decoder *dec, unsigned reg, uint32_t val)
++{
++	uint32_t *pm4 =	dec->cs->buf;
++	pm4[dec->cs->cdw++] = RUVD_PKT0(reg >> 2, 0);
++	pm4[dec->cs->cdw++] = val;
++}
++
++/* send a command to the VCPU through the GPCOM registers */
++static void send_cmd(struct ruvd_decoder *dec, unsigned cmd,
++		     struct radeon_winsys_cs_handle* cs_buf, uint32_t off,
++		     enum radeon_bo_usage usage, enum radeon_bo_domain domain)
++{
++	int reloc_idx;
++
++	reloc_idx = dec->ws->cs_add_reloc(dec->cs, cs_buf, usage, domain);
++	set_reg(dec, RUVD_GPCOM_VCPU_DATA0, off);
++	set_reg(dec, RUVD_GPCOM_VCPU_DATA1, reloc_idx * 4);
++	set_reg(dec, RUVD_GPCOM_VCPU_CMD, cmd << 1);
++}
++
++/* send a message command to the VCPU */
++static void send_msg(struct ruvd_decoder *dec, struct ruvd_msg *msg)
++{
++	struct ruvd_buffer* buf;
++	void *ptr;
++
++	/* grap a message buffer */
++	buf = &dec->msg_fb_buffers[dec->cur_buffer];
++
++	/* copy the message into it */
++	ptr = dec->ws->buffer_map(buf->cs_handle, dec->cs, PIPE_TRANSFER_WRITE);
++	if (!ptr)
++		return;
++
++	memcpy(ptr, msg, sizeof(*msg));
++	memset(ptr + sizeof(*msg), 0, buf->buf->size - sizeof(*msg));
++	dec->ws->buffer_unmap(buf->cs_handle);
++
++	/* and send it to the hardware */
++	send_cmd(dec, RUVD_CMD_MSG_BUFFER, buf->cs_handle, 0,
++		 RADEON_USAGE_READ, RADEON_DOMAIN_VRAM);
++}
++
++/* create a buffer in the winsys */
++static bool create_buffer(struct ruvd_decoder *dec,
++			  struct ruvd_buffer *buffer,
++			  unsigned size)
++{
++	buffer->buf = dec->ws->buffer_create(dec->ws, size, 4096, false,
++					     RADEON_DOMAIN_GTT | RADEON_DOMAIN_VRAM);
++	if (!buffer->buf)
++		return false;
++
++	buffer->cs_handle = dec->ws->buffer_get_cs_handle(buffer->buf);
++	if (!buffer->cs_handle)
++		return false;
++
++	return true;
++}
++
++/* destroy a buffer */
++static void destroy_buffer(struct ruvd_buffer *buffer)
++{
++	pb_reference(&buffer->buf, NULL);
++	buffer->cs_handle = NULL;
++}
++
++/* reallocate a buffer, preserving its content */
++static bool resize_buffer(struct ruvd_decoder *dec,
++			  struct ruvd_buffer *new_buf,
++			  unsigned new_size)
++{
++	unsigned bytes = MIN2(new_buf->buf->size, new_size);
++	struct ruvd_buffer old_buf = *new_buf;
++	void *src = NULL, *dst = NULL;
++
++	if (!create_buffer(dec, new_buf, new_size))
++		goto error;
++
++	src = dec->ws->buffer_map(old_buf.cs_handle, dec->cs, PIPE_TRANSFER_READ);
++	if (!src)
++		goto error;
++
++	dst = dec->ws->buffer_map(new_buf->cs_handle, dec->cs, PIPE_TRANSFER_WRITE);
++	if (!dst)
++		goto error;
++
++	memcpy(dst, src, bytes);
++	if (new_size > bytes) {
++		new_size -= bytes;
++		dst += bytes;
++		memset(dst, 0, new_size);
++	}
++	dec->ws->buffer_unmap(new_buf->cs_handle);
++	dec->ws->buffer_unmap(old_buf.cs_handle);
++	destroy_buffer(&old_buf);
++	return true;
++
++error:
++	if (src) dec->ws->buffer_unmap(old_buf.cs_handle);
++	destroy_buffer(new_buf);
++	*new_buf = old_buf;
++	return false;
++}
++
++/* clear the buffer with zeros */
++static void clear_buffer(struct ruvd_decoder *dec,
++			 struct ruvd_buffer* buffer)
++{
++	//TODO: let the GPU do the job
++	void *ptr = dec->ws->buffer_map(buffer->cs_handle, dec->cs,
++					PIPE_TRANSFER_WRITE);
++	if (!ptr)
++		return;
++
++	memset(ptr, 0, buffer->buf->size);
++	dec->ws->buffer_unmap(buffer->cs_handle);
++}
++
++/* cycle to the next set of buffers */
++static void next_buffer(struct ruvd_decoder *dec)
++{
++	++dec->cur_buffer;
++	dec->cur_buffer %= NUM_BUFFERS;
++}
++
++/* convert the profile into something UVD understands */
++static uint32_t profile2stream_type(enum pipe_video_profile profile)
++{
++	switch (u_reduce_video_profile(profile)) {
++	case PIPE_VIDEO_CODEC_MPEG4_AVC:
++		return RUVD_CODEC_H264;
++
++	case PIPE_VIDEO_CODEC_VC1:
++		return RUVD_CODEC_VC1;
++
++	case PIPE_VIDEO_CODEC_MPEG12:
++		return RUVD_CODEC_MPEG2;
++
++	case PIPE_VIDEO_CODEC_MPEG4:
++		return RUVD_CODEC_MPEG4;
++
++	default:
++		assert(0);
++		return 0;
++	}
++}
++
++/* calculate size of reference picture buffer */
++static unsigned calc_dpb_size(enum pipe_video_profile profile,
++			      unsigned width, unsigned height,
++			      unsigned max_references)
++{
++	unsigned width_in_mb, height_in_mb, image_size, dpb_size;
++
++	// always align them to MB size for dpb calculation
++	width = align(width, VL_MACROBLOCK_WIDTH);
++	height = align(height, VL_MACROBLOCK_HEIGHT);
++
++	// always one more for currently decoded picture
++	max_references += 1;
++
++	// aligned size of a single frame
++	image_size = width * height;
++	image_size += image_size / 2;
++	image_size = align(image_size, 1024);
++
++	// picture width & height in 16 pixel units
++	width_in_mb = width / VL_MACROBLOCK_WIDTH;
++	height_in_mb = align(height / VL_MACROBLOCK_HEIGHT, 2);
++
++	switch (u_reduce_video_profile(profile)) {
++	case PIPE_VIDEO_CODEC_MPEG4_AVC:
++		// the firmware seems to allways assume a minimum of ref frames
++		max_references = MAX2(NUM_H264_REFS, max_references);
++
++		// reference picture buffer
++		dpb_size = image_size * max_references;
++
++		// macroblock context buffer
++		dpb_size += width_in_mb * height_in_mb * max_references * 192;
++
++		// IT surface buffer
++		dpb_size += width_in_mb * height_in_mb * 32;
++		break;
++
++	case PIPE_VIDEO_CODEC_VC1:
++		// reference picture buffer
++		dpb_size = image_size * max_references;
++
++		// CONTEXT_BUFFER
++		dpb_size += width_in_mb * height_in_mb * 128;
++
++		// IT surface buffer
++		dpb_size += width_in_mb * 64;
++
++		// DB surface buffer
++		dpb_size += width_in_mb * 128;
++
++		// BP
++		dpb_size += align(MAX2(width_in_mb, height_in_mb) * 7 * 16, 64);
++		break;
++
++	case PIPE_VIDEO_CODEC_MPEG12:
++		// reference picture buffer, must be big enough for all frames
++		dpb_size = image_size * NUM_MPEG2_REFS;
++		break;
++
++	case PIPE_VIDEO_CODEC_MPEG4:
++		// reference picture buffer
++		dpb_size = image_size * max_references;
++
++		// CM
++		dpb_size += width_in_mb * height_in_mb * 64;
++
++		// IT surface buffer
++		dpb_size += align(width_in_mb * height_in_mb * 32, 64);
++		break;
++
++	default:
++		// something is missing here
++		assert(0);
++
++		// at least use a sane default value
++		dpb_size = 32 * 1024 * 1024;
++		break;
++	}
++	return dpb_size;
++}
++
++/* get h264 specific message bits */
++static struct ruvd_h264 get_h264_msg(struct ruvd_decoder *dec, struct pipe_h264_picture_desc *pic)
++{
++	struct ruvd_h264 result;
++
++	memset(&result, 0, sizeof(result));
++	switch (pic->base.profile) {
++	case PIPE_VIDEO_PROFILE_MPEG4_AVC_BASELINE:
++		result.profile = RUVD_H264_PROFILE_BASELINE;
++		break;
++
++	case PIPE_VIDEO_PROFILE_MPEG4_AVC_MAIN:
++		result.profile = RUVD_H264_PROFILE_MAIN;
++		break;
++
++	case PIPE_VIDEO_PROFILE_MPEG4_AVC_HIGH:
++		result.profile = RUVD_H264_PROFILE_HIGH;
++		break;
++
++	default:
++		assert(0);
++		break;
++	}
++	if (((dec->base.width * dec->base.height) >> 8) <= 1620)
++		result.level = 30;
++	else
++		result.level = 41;
++
++	result.sps_info_flags = 0;
++	result.sps_info_flags |= pic->direct_8x8_inference_flag << 0;
++	result.sps_info_flags |= pic->mb_adaptive_frame_field_flag << 1;
++	result.sps_info_flags |= pic->frame_mbs_only_flag << 2;
++	result.sps_info_flags |= pic->delta_pic_order_always_zero_flag << 3;
++
++	result.pps_info_flags = 0;
++	result.pps_info_flags |= pic->transform_8x8_mode_flag << 0;
++	result.pps_info_flags |= pic->redundant_pic_cnt_present_flag << 1;
++	result.pps_info_flags |= pic->constrained_intra_pred_flag << 2;
++	result.pps_info_flags |= pic->deblocking_filter_control_present_flag << 3;
++	result.pps_info_flags |= pic->weighted_bipred_idc << 4;
++	result.pps_info_flags |= pic->weighted_pred_flag << 6;
++	result.pps_info_flags |= pic->pic_order_present_flag << 7;
++	result.pps_info_flags |= pic->entropy_coding_mode_flag << 8;
++
++	result.chroma_format = 0x1;
++	result.bit_depth_luma_minus8 = 0;
++	result.bit_depth_chroma_minus8 = 0;
++
++	result.log2_max_frame_num_minus4 = pic->log2_max_frame_num_minus4;
++	result.pic_order_cnt_type = pic->pic_order_cnt_type;
++	result.log2_max_pic_order_cnt_lsb_minus4 = pic->log2_max_pic_order_cnt_lsb_minus4;
++	result.num_ref_frames = pic->num_ref_frames;
++	result.pic_init_qp_minus26 = pic->pic_init_qp_minus26;
++	result.chroma_qp_index_offset = pic->chroma_qp_index_offset;
++	result.second_chroma_qp_index_offset = pic->second_chroma_qp_index_offset;
++
++	result.num_slice_groups_minus1 = 0;
++	result.slice_group_map_type = 0;
++
++	result.num_ref_idx_l0_active_minus1 = pic->num_ref_idx_l0_active_minus1;
++	result.num_ref_idx_l1_active_minus1 = pic->num_ref_idx_l1_active_minus1;
++
++	result.slice_group_change_rate_minus1 = 0;
++
++	memcpy(result.scaling_list_4x4, pic->scaling_lists_4x4, 6*64);
++	memcpy(result.scaling_list_8x8, pic->scaling_lists_8x8, 2*64);
++
++	result.frame_num = pic->frame_num;
++	memcpy(result.frame_num_list, pic->frame_num_list, 4*16);
++	result.curr_field_order_cnt_list[0] = pic->field_order_cnt[0];
++	result.curr_field_order_cnt_list[1] = pic->field_order_cnt[1];
++	memcpy(result.field_order_cnt_list, pic->field_order_cnt_list, 4*16*2);
++
++	result.decoded_pic_idx = pic->frame_num;
++
++	return result;
++}
++
++/* get vc1 specific message bits */
++static struct ruvd_vc1 get_vc1_msg(struct pipe_vc1_picture_desc *pic)
++{
++	struct ruvd_vc1 result;
++
++	memset(&result, 0, sizeof(result));
++	switch(pic->base.profile) {
++	case PIPE_VIDEO_PROFILE_VC1_SIMPLE:
++		result.profile = RUVD_VC1_PROFILE_SIMPLE;
++		break;
++
++	case PIPE_VIDEO_PROFILE_VC1_MAIN:
++		result.profile = RUVD_VC1_PROFILE_MAIN;
++		break;
++		
++	case PIPE_VIDEO_PROFILE_VC1_ADVANCED:
++		result.profile = RUVD_VC1_PROFILE_ADVANCED;
++		break;
++	default:
++		assert(0);
++	}
++
++	if (pic->base.profile == PIPE_VIDEO_PROFILE_VC1_ADVANCED) {
++		result.level = 0;
++
++		result.sps_info_flags |= pic->postprocflag << 7;
++		result.sps_info_flags |= pic->pulldown << 6;
++		result.sps_info_flags |= pic->interlace << 5;
++		result.sps_info_flags |= pic->tfcntrflag << 4;
++		result.sps_info_flags |= pic->psf << 1;
++
++		result.pps_info_flags |= pic->panscan_flag << 7;
++		result.pps_info_flags |= pic->refdist_flag << 6;
++		result.pps_info_flags |= pic->extended_dmv << 8;
++		result.pps_info_flags |= pic->range_mapy_flag << 31;
++		result.pps_info_flags |= pic->range_mapy << 28;
++		result.pps_info_flags |= pic->range_mapuv_flag << 27;
++		result.pps_info_flags |= pic->range_mapuv << 24;
++
++	} else {
++		result.level = 0;
++		result.pps_info_flags |= pic->multires << 21;
++		result.pps_info_flags |= pic->syncmarker << 20;
++		result.pps_info_flags |= pic->rangered << 19;
++		result.pps_info_flags |= pic->maxbframes << 16;
++	}
++
++	result.sps_info_flags |= pic->finterpflag << 3;
++	//(((unsigned int)(pPicParams->advance.reserved1))        << SPS_INFO_VC1_RESERVED_SHIFT)
++
++	result.pps_info_flags |= pic->loopfilter << 5;
++	result.pps_info_flags |= pic->fastuvmc << 4;
++	result.pps_info_flags |= pic->extended_mv << 3;
++	result.pps_info_flags |= pic->dquant << 1;
++	result.pps_info_flags |= pic->vstransform << 0;
++	result.pps_info_flags |= pic->overlap << 11;
++	result.pps_info_flags |= pic->quantizer << 9;
++
++
++#if 0
++uint32_t 	slice_count
++uint8_t 	picture_type
++uint8_t 	frame_coding_mode
++uint8_t 	deblockEnable
++uint8_t 	pquant
++#endif
++
++        result.chroma_format  = 1;
++	return result;
++}
++
++/* extract the frame number from a referenced video buffer */
++static uint32_t get_ref_pic_idx(struct ruvd_decoder *dec, struct pipe_video_buffer *ref)
++{
++	uint32_t min = dec->frame_number - NUM_MPEG2_REFS;
++	uint32_t max = dec->frame_number - 1;
++	uintptr_t frame;
++
++	/* seems to be the most sane fallback */
++	if (!ref)
++		return max;
++
++	/* get the frame number from the associated data */
++	frame = (uintptr_t)vl_video_buffer_get_associated_data(ref, &dec->base);
++
++	/* limit the frame number to a valid range */
++	return MAX2(MIN2(frame, max), min);
++}
++
++/* get mpeg2 specific msg bits */
++static struct ruvd_mpeg2 get_mpeg2_msg(struct ruvd_decoder *dec,
++				       struct pipe_mpeg12_picture_desc *pic)
++{
++	struct ruvd_mpeg2 result;
++	unsigned i;
++
++	memset(&result, 0, sizeof(result));
++	result.decoded_pic_idx = dec->frame_number;
++	for (i = 0; i < 2; ++i)
++		result.ref_pic_idx[i] = get_ref_pic_idx(dec, pic->ref[i]);
++
++	result.load_intra_quantiser_matrix = 1;
++	result.load_nonintra_quantiser_matrix = 1;
++	memcpy(&result.intra_quantiser_matrix, pic->intra_matrix, 64);
++	memcpy(&result.nonintra_quantiser_matrix, pic->non_intra_matrix, 64);
++
++	result.profile_and_level_indication = 0;
++	result.chroma_format = 0x1;
++
++	result.picture_coding_type = pic->picture_coding_type;
++	result.f_code[0][0] = pic->f_code[0][0] + 1;
++	result.f_code[0][1] = pic->f_code[0][1] + 1;
++	result.f_code[1][0] = pic->f_code[1][0] + 1;
++	result.f_code[1][1] = pic->f_code[1][1] + 1;
++	result.intra_dc_precision = pic->intra_dc_precision;
++	result.pic_structure = pic->picture_structure;
++	result.top_field_first = pic->top_field_first;
++	result.frame_pred_frame_dct = pic->frame_pred_frame_dct;
++	result.concealment_motion_vectors = pic->concealment_motion_vectors;
++	result.q_scale_type = pic->q_scale_type;
++	result.intra_vlc_format = pic->intra_vlc_format;
++	result.alternate_scan = pic->alternate_scan;
++
++	return result;
++}
++
++/* get mpeg4 specific msg bits */
++static struct ruvd_mpeg4 get_mpeg4_msg(struct ruvd_decoder *dec,
++				       struct pipe_mpeg4_picture_desc *pic)
++{
++	struct ruvd_mpeg4 result;
++	unsigned i;
++	memset(&result, 0, sizeof(result));
++	result.decoded_pic_idx = dec->frame_number;
++	for (i = 0; i < 2; ++i)
++		result.ref_pic_idx[i] = get_ref_pic_idx(dec, pic->ref[i]);
++
++	result.video_object_layer_width = dec->base.width;
++        result.video_object_layer_height = dec->base.height;
++
++	result.vop_time_increment_resolution = pic->vop_time_increment_resolution;
++	result.quant_type = pic->quant_type;
++
++	result.flags |= pic->short_video_header << 0;
++	//result.flags |= obmc_disable << 1;
++	result.flags |= pic->interlaced << 2;
++        result.flags |= 1 << 3; // load_intra_quant_mat
++	result.flags |= 1 << 4; // load_nonintra_quant_mat
++	result.flags |= pic->quarter_sample << 5;
++	//result.flags |= complexity_estimation_disable << 6
++	result.flags |= pic->resync_marker_disable << 7;
++	//result.flags |= data_partitioned << 8;
++	//result.flags |= reversible_vlc << 9;
++	//result.flags |= newpred_enable << 10;
++	//result.flags |= reduced_resolution_vop_enable << 11;
++	//result.flags |= scalability << 12;
++	//result.flags |= is_object_layer_identifier << 13;
++	//result.flags |= fixed_vop_rate << 14;
++	//result.flags |= newpred_segment_type << 15;
++
++	memcpy(&result.intra_quant_mat, pic->intra_matrix, 64);
++	memcpy(&result.nonintra_quant_mat, pic->non_intra_matrix, 64);
++
++	/*
++	int32_t 	trd [2]
++	int32_t 	trb [2]
++	uint8_t 	vop_coding_type
++	uint8_t 	vop_fcode_forward
++	uint8_t 	vop_fcode_backward
++	uint8_t 	rounding_control
++	uint8_t 	alternate_vertical_scan_flag
++	uint8_t 	top_field_first
++	*/
++
++	return result;
++}
++
++/**
++ * destroy this video decoder
++ */
++static void ruvd_destroy(struct pipe_video_decoder *decoder)
++{
++	struct ruvd_decoder *dec = (struct ruvd_decoder*)decoder;
++	struct ruvd_msg msg;
++	unsigned i;
++
++	assert(decoder);
++
++	memset(&msg, 0, sizeof(msg));
++	msg.size = sizeof(msg);
++	msg.msg_type = RUVD_MSG_DESTROY;
++	msg.stream_handle = dec->stream_handle;
++	send_msg(dec, &msg);
++
++	flush(dec);
++
++	dec->ws->cs_destroy(dec->cs);
++
++	for (i = 0; i < NUM_BUFFERS; ++i) {
++		destroy_buffer(&dec->msg_fb_buffers[i]);
++		destroy_buffer(&dec->bs_buffers[i]);
++	}
++
++	destroy_buffer(&dec->dpb);
++
++	FREE(dec);
++}
++
++/* free associated data in the video buffer callback */
++static void ruvd_destroy_associated_data(void *data)
++{
++	/* NOOP, since we only use an intptr */
++}
++
++/**
++ * start decoding of a new frame
++ */
++static void ruvd_begin_frame(struct pipe_video_decoder *decoder,
++			     struct pipe_video_buffer *target,
++			     struct pipe_picture_desc *picture)
++{
++	struct ruvd_decoder *dec = (struct ruvd_decoder*)decoder;
++	uintptr_t frame;
++
++	assert(decoder);
++
++	frame = ++dec->frame_number;
++	vl_video_buffer_set_associated_data(target, decoder, (void *)frame,
++					    &ruvd_destroy_associated_data);
++
++	dec->bs_size = 0;
++	dec->bs_ptr = dec->ws->buffer_map(
++		dec->bs_buffers[dec->cur_buffer].cs_handle,
++		dec->cs, PIPE_TRANSFER_WRITE);
++}
++
++/**
++ * decode a macroblock
++ */
++static void ruvd_decode_macroblock(struct pipe_video_decoder *decoder,
++				   struct pipe_video_buffer *target,
++				   struct pipe_picture_desc *picture,
++				   const struct pipe_macroblock *macroblocks,
++				   unsigned num_macroblocks)
++{
++	/* not supported (yet) */
++	assert(0);
++}
++
++/**
++ * decode a bitstream
++ */
++static void ruvd_decode_bitstream(struct pipe_video_decoder *decoder,
++				  struct pipe_video_buffer *target,
++				  struct pipe_picture_desc *picture,
++				  unsigned num_buffers,
++				  const void * const *buffers,
++				  const unsigned *sizes)
++{
++	struct ruvd_decoder *dec = (struct ruvd_decoder*)decoder;
++	unsigned i;
++
++	assert(decoder);
++
++	if (!dec->bs_ptr)
++		return;
++
++	for (i = 0; i < num_buffers; ++i) {
++		struct ruvd_buffer *buf = &dec->bs_buffers[dec->cur_buffer];
++		unsigned new_size = dec->bs_size + sizes[i];
++
++		if (new_size > buf->buf->size) {
++			dec->ws->buffer_unmap(buf->cs_handle);
++			if (!resize_buffer(dec, buf, new_size)) {
++				RUVD_ERR("Can't resize bitstream buffer!");
++				return;
++			}
++
++			dec->bs_ptr = dec->ws->buffer_map(buf->cs_handle, dec->cs,
++							  PIPE_TRANSFER_WRITE);
++			if (!dec->bs_ptr)
++				return;
++
++			dec->bs_ptr += dec->bs_size;
++		}
++
++		memcpy(dec->bs_ptr, buffers[i], sizes[i]);
++		dec->bs_size += sizes[i];
++		dec->bs_ptr += sizes[i];
++	}
++}
++
++/**
++ * end decoding of the current frame
++ */
++static void ruvd_end_frame(struct pipe_video_decoder *decoder,
++			   struct pipe_video_buffer *target,
++			   struct pipe_picture_desc *picture)
++{
++	struct ruvd_decoder *dec = (struct ruvd_decoder*)decoder;
++	struct radeon_winsys_cs_handle *dt;
++	struct ruvd_buffer *msg_fb_buf, *bs_buf;
++	struct ruvd_msg msg;
++	unsigned bs_size;
++
++	assert(decoder);
++
++	if (!dec->bs_ptr)
++		return;
++
++	msg_fb_buf = &dec->msg_fb_buffers[dec->cur_buffer];
++	bs_buf = &dec->bs_buffers[dec->cur_buffer];
++
++	bs_size = align(dec->bs_size, 128);
++	memset(dec->bs_ptr, 0, bs_size - dec->bs_size);
++	dec->ws->buffer_unmap(bs_buf->cs_handle);
++
++	memset(&msg, 0, sizeof(msg));
++	msg.size = sizeof(msg);
++	msg.msg_type = RUVD_MSG_DECODE;
++	msg.stream_handle = dec->stream_handle;
++	msg.status_report_feedback_number = dec->frame_number;
++
++	msg.decode.stream_type = profile2stream_type(dec->base.profile);
++	msg.decode.decode_flags = 0x1;
++	msg.decode.width_in_samples = dec->base.width;
++	msg.decode.height_in_samples = dec->base.height;
++
++	msg.decode.dpb_size = dec->dpb.buf->size;
++	msg.decode.bsd_size = bs_size;
++
++	dt = dec->set_dtb(&msg, (struct vl_video_buffer *)target);
++
++	switch (u_reduce_video_profile(picture->profile)) {
++	case PIPE_VIDEO_CODEC_MPEG4_AVC:
++		msg.decode.h264 = get_h264_msg(dec, (struct pipe_h264_picture_desc*)picture);
++		break;
++
++	case PIPE_VIDEO_CODEC_VC1:
++		msg.decode.vc1 = get_vc1_msg((struct pipe_vc1_picture_desc*)picture);
++		break;
++
++	case PIPE_VIDEO_CODEC_MPEG12:
++		msg.decode.mpeg2 = get_mpeg2_msg(dec, (struct pipe_mpeg12_picture_desc*)picture);
++		break;
++
++	case PIPE_VIDEO_CODEC_MPEG4:
++		msg.decode.mpeg4 = get_mpeg4_msg(dec, (struct pipe_mpeg4_picture_desc*)picture);
++		break;
++
++	default:
++		assert(0);
++		return;
++	}
++
++	msg.decode.db_surf_tile_config = msg.decode.dt_surf_tile_config;
++	msg.decode.extension_support = 0x1;
++
++	send_msg(dec, &msg);
++	send_cmd(dec, RUVD_CMD_DPB_BUFFER, dec->dpb.cs_handle, 0,
++		 RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
++	send_cmd(dec, RUVD_CMD_BITSTREAM_BUFFER, bs_buf->cs_handle,
++		 0, RADEON_USAGE_READ, RADEON_DOMAIN_GTT);
++	send_cmd(dec, RUVD_CMD_DECODING_TARGET_BUFFER, dt, 0,
++		 RADEON_USAGE_WRITE, RADEON_DOMAIN_VRAM);
++	send_cmd(dec, RUVD_CMD_FEEDBACK_BUFFER, msg_fb_buf->cs_handle,
++		 0x1000, RADEON_USAGE_WRITE, RADEON_DOMAIN_VRAM);
++	set_reg(dec, RUVD_ENGINE_CNTL, 1);
++
++	flush(dec);
++	next_buffer(dec);
++}
++
++/**
++ * flush any outstanding command buffers to the hardware
++ */
++static void ruvd_flush(struct pipe_video_decoder *decoder)
++{
++}
++
++/**
++ * create and UVD decoder
++ */
++struct pipe_video_decoder *ruvd_create_decoder(struct pipe_context *context,
++					       enum pipe_video_profile profile,
++					       enum pipe_video_entrypoint entrypoint,
++					       enum pipe_video_chroma_format chroma_format,
++					       unsigned width, unsigned height,
++					       unsigned max_references, bool expect_chunked_decode,
++					       struct radeon_winsys* ws,
++					       ruvd_set_dtb set_dtb)
++{
++	unsigned dpb_size = calc_dpb_size(profile, width, height, max_references);
++	struct ruvd_decoder *dec;
++	struct ruvd_msg msg;
++	int i;
++
++	switch(u_reduce_video_profile(profile)) {
++	case PIPE_VIDEO_CODEC_MPEG12:
++		if (entrypoint > PIPE_VIDEO_ENTRYPOINT_BITSTREAM)
++			return vl_create_mpeg12_decoder(context, profile, entrypoint,
++							chroma_format, width,
++							height, max_references, expect_chunked_decode);
++
++		/* fall through */
++	case PIPE_VIDEO_CODEC_MPEG4:
++	case PIPE_VIDEO_CODEC_MPEG4_AVC:
++		width = align(width, VL_MACROBLOCK_WIDTH);
++		height = align(height, VL_MACROBLOCK_HEIGHT);
++		break;
++
++	default:
++		break;
++	}
++
++
++	dec = CALLOC_STRUCT(ruvd_decoder);
++
++	if (!dec)
++		return NULL;
++
++	dec->base.context = context;
++	dec->base.profile = profile;
++	dec->base.entrypoint = entrypoint;
++	dec->base.chroma_format = chroma_format;
++	dec->base.width = width;
++	dec->base.height = height;
++
++	dec->base.destroy = ruvd_destroy;
++	dec->base.begin_frame = ruvd_begin_frame;
++	dec->base.decode_macroblock = ruvd_decode_macroblock;
++	dec->base.decode_bitstream = ruvd_decode_bitstream;
++	dec->base.end_frame = ruvd_end_frame;
++	dec->base.flush = ruvd_flush;
++
++	dec->set_dtb = set_dtb;
++	dec->stream_handle = alloc_stream_handle();
++	dec->ws = ws;
++	dec->cs = ws->cs_create(ws, RING_UVD);
++	if (!dec->cs) {
++		RUVD_ERR("Can't get command submission context.\n");
++		goto error;
++	}
++
++	for (i = 0; i < NUM_BUFFERS; ++i) {
++		unsigned msg_fb_size = align(sizeof(struct ruvd_msg), 0x1000) + 0x1000;
++		if (!create_buffer(dec, &dec->msg_fb_buffers[i], msg_fb_size)) {
++			RUVD_ERR("Can't allocated message buffers.\n");
++			goto error;
++		}
++
++		if (!create_buffer(dec, &dec->bs_buffers[i], 4096)) {
++			RUVD_ERR("Can't allocated bitstream buffers.\n");
++			goto error;
++		}
++
++		clear_buffer(dec, &dec->msg_fb_buffers[i]);
++		clear_buffer(dec, &dec->bs_buffers[i]);
++	}
++
++	if (!create_buffer(dec, &dec->dpb, dpb_size)) {
++		RUVD_ERR("Can't allocated dpb.\n");
++		goto error;
++	}
++
++	clear_buffer(dec, &dec->dpb);
++
++	memset(&msg, 0, sizeof(msg));
++	msg.size = sizeof(msg);
++	msg.msg_type = RUVD_MSG_CREATE;
++	msg.stream_handle = dec->stream_handle;
++	msg.create.stream_type = profile2stream_type(dec->base.profile);
++	msg.create.width_in_samples = dec->base.width;
++	msg.create.height_in_samples = dec->base.height;
++	msg.create.dpb_size = dec->dpb.buf->size;
++	send_msg(dec, &msg);
++	flush(dec);
++	next_buffer(dec);
++
++	return &dec->base;
++
++error:
++	if (dec->cs) dec->ws->cs_destroy(dec->cs);
++
++	for (i = 0; i < NUM_BUFFERS; ++i) {
++		destroy_buffer(&dec->msg_fb_buffers[i]);
++		destroy_buffer(&dec->bs_buffers[i]);
++	}
++
++	destroy_buffer(&dec->dpb);
++
++	FREE(dec);
++
++	return NULL;
++}
++
++/**
++ * join surfaces into the same buffer with identical tiling params
++ * sumup their sizes and replace the backend buffers with a single bo
++ */
++void ruvd_join_surfaces(struct radeon_winsys* ws, unsigned bind,
++			struct pb_buffer** buffers[VL_NUM_COMPONENTS],
++			struct radeon_surface *surfaces[VL_NUM_COMPONENTS])
++{
++	unsigned best_tiling, best_wh, off;
++	unsigned size, alignment;
++	struct pb_buffer *pb;
++	unsigned i, j;
++
++	for (i = 0, best_tiling = 0, best_wh = ~0; i < VL_NUM_COMPONENTS; ++i) {
++		unsigned wh;
++
++		if (!surfaces[i])
++			continue;
++
++		/* choose the smallest bank w/h for now */
++		wh = surfaces[i]->bankw * surfaces[i]->bankh;
++		if (wh < best_wh) {
++			best_wh = wh;
++			best_tiling = i;
++		}
++	}
++
++	for (i = 0, off = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!surfaces[i])
++			continue;
++
++		/* copy the tiling parameters */
++		surfaces[i]->bankw = surfaces[best_tiling]->bankw;
++		surfaces[i]->bankh = surfaces[best_tiling]->bankh;
++		surfaces[i]->mtilea = surfaces[best_tiling]->mtilea;
++		surfaces[i]->tile_split = surfaces[best_tiling]->tile_split;
++
++		/* adjust the texture layer offsets */
++		off = align(off, surfaces[i]->bo_alignment);
++		for (j = 0; j < Elements(surfaces[i]->level); ++j)
++			surfaces[i]->level[j].offset += off;
++		off += surfaces[i]->bo_size;
++	}
++
++	for (i = 0, size = 0, alignment = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!buffers[i] || !*buffers[i])
++			continue;
++
++		size = align(size, (*buffers[i])->alignment);
++		size += (*buffers[i])->size;
++		alignment = MAX2(alignment, (*buffers[i])->alignment * 1);
++	}
++
++	if (!size)
++		return;
++
++	/* TODO: 2D tiling workaround */
++	alignment *= 2;
++
++	pb = ws->buffer_create(ws, size, alignment, bind, RADEON_DOMAIN_VRAM);
++	if (!pb)
++		return;
++
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!buffers[i] || !*buffers[i])
++			continue;
++
++		pb_reference(buffers[i], pb);
++	}
++
++	pb_reference(&pb, NULL);
++}
++
++/* calculate top/bottom offset */
++static unsigned texture_offset(struct radeon_surface *surface, unsigned layer)
++{
++	return surface->level[0].offset +
++		layer * surface->level[0].slice_size;
++}
++
++/* hw encode the aspect of macro tiles */
++static unsigned macro_tile_aspect(unsigned macro_tile_aspect)
++{
++	switch (macro_tile_aspect) {
++	default:
++	case 1: macro_tile_aspect = 0;  break;
++	case 2: macro_tile_aspect = 1;  break;
++	case 4: macro_tile_aspect = 2;  break;
++	case 8: macro_tile_aspect = 3;  break;
++	}
++	return macro_tile_aspect;
++}
++
++/* hw encode the bank width and height */
++static unsigned bank_wh(unsigned bankwh)
++{
++	switch (bankwh) {
++	default:
++	case 1: bankwh = 0;     break;
++	case 2: bankwh = 1;     break;
++	case 4: bankwh = 2;     break;
++	case 8: bankwh = 3;     break;
++	}
++	return bankwh;
++}
++
++/**
++ * fill decoding target field from the luma and chroma surfaces
++ */
++void ruvd_set_dt_surfaces(struct ruvd_msg *msg, struct radeon_surface *luma,
++			  struct radeon_surface *chroma)
++{
++	msg->decode.dt_pitch = luma->level[0].pitch_bytes;
++	switch (luma->level[0].mode) {
++	case RADEON_SURF_MODE_LINEAR_ALIGNED:
++		msg->decode.dt_tiling_mode = RUVD_TILE_LINEAR;
++		msg->decode.dt_array_mode = RUVD_ARRAY_MODE_LINEAR;
++		break;
++	case RADEON_SURF_MODE_1D:
++		msg->decode.dt_tiling_mode = RUVD_TILE_8X8;
++		msg->decode.dt_array_mode = RUVD_ARRAY_MODE_1D_THIN;
++		break;
++	case RADEON_SURF_MODE_2D:
++		msg->decode.dt_tiling_mode = RUVD_TILE_8X8;
++		msg->decode.dt_array_mode = RUVD_ARRAY_MODE_2D_THIN;
++		break;
++	default:
++		assert(0);
++		break;
++	}
++
++	msg->decode.dt_luma_top_offset = texture_offset(luma, 0);
++	msg->decode.dt_chroma_top_offset = texture_offset(chroma, 0);
++	if (msg->decode.dt_field_mode) {
++		msg->decode.dt_luma_bottom_offset = texture_offset(luma, 1);
++		msg->decode.dt_chroma_bottom_offset = texture_offset(chroma, 1);
++	} else {
++		msg->decode.dt_luma_bottom_offset = msg->decode.dt_luma_top_offset;
++		msg->decode.dt_chroma_bottom_offset = msg->decode.dt_chroma_top_offset;
++	}
++
++	assert(luma->bankw == chroma->bankw);
++	assert(luma->bankh == chroma->bankh);
++	assert(luma->mtilea == chroma->mtilea);
++
++	msg->decode.dt_surf_tile_config |= RUVD_BANK_WIDTH(bank_wh(luma->bankw));
++	msg->decode.dt_surf_tile_config |= RUVD_BANK_HEIGHT(bank_wh(luma->bankh));
++	msg->decode.dt_surf_tile_config |= RUVD_MACRO_TILE_ASPECT_RATIO(macro_tile_aspect(luma->mtilea));
++}
++
++int ruvd_get_video_param(struct pipe_screen *screen,
++			 enum pipe_video_profile profile,
++			 enum pipe_video_cap param)
++{
++	switch (param) {
++	case PIPE_VIDEO_CAP_SUPPORTED:
++		switch (u_reduce_video_profile(profile)) {
++		case PIPE_VIDEO_CODEC_MPEG12:
++		case PIPE_VIDEO_CODEC_MPEG4:
++			/* TODO not all hw families support MPEG4 */
++		case PIPE_VIDEO_CODEC_MPEG4_AVC:
++		case PIPE_VIDEO_CODEC_VC1:
++			return true;
++		default:
++			return false;
++		}
++	case PIPE_VIDEO_CAP_NPOT_TEXTURES:
++		return 1;
++	case PIPE_VIDEO_CAP_MAX_WIDTH:
++		return 2048;
++	case PIPE_VIDEO_CAP_MAX_HEIGHT:
++		return 1152;
++	case PIPE_VIDEO_CAP_PREFERED_FORMAT:
++		return PIPE_FORMAT_NV12;
++	case PIPE_VIDEO_CAP_PREFERS_INTERLACED:
++		return false;
++	case PIPE_VIDEO_CAP_SUPPORTS_INTERLACED:
++		return false; /* TODO: enable this */
++	case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
++		return true;
++	default:
++		return 0;
++	}
++}
++
++boolean ruvd_is_format_supported(struct pipe_screen *screen,
++				 enum pipe_format format,
++				 enum pipe_video_profile profile)
++{
++	/* we can only handle this one anyway */
++	return format == PIPE_FORMAT_NV12;
++}
+diff --git a/src/gallium/drivers/radeon/radeon_uvd.h b/src/gallium/drivers/radeon/radeon_uvd.h
+new file mode 100644
+index 0000000..b6bceae
+--- /dev/null
++++ b/src/gallium/drivers/radeon/radeon_uvd.h
+@@ -0,0 +1,377 @@
++/**************************************************************************
++ *
++ * Copyright 2011 Advanced Micro Devices, Inc.
++ * All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sub license, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
++ * IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR
++ * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ **************************************************************************/
++
++/*
++ * Authors:
++ *      Christian König <christian.koenig at amd.com>
++ *
++ */
++
++#ifndef RADEON_UVD_H
++#define RADEON_UVD_H
++
++/* UVD uses PM4 packet type 0 and 2 */
++#define RUVD_PKT_TYPE_S(x)		(((x) & 0x3) << 30)
++#define RUVD_PKT_TYPE_G(x)		(((x) >> 30) & 0x3)
++#define RUVD_PKT_TYPE_C			0x3FFFFFFF
++#define RUVD_PKT_COUNT_S(x)		(((x) & 0x3FFF) << 16)
++#define RUVD_PKT_COUNT_G(x)		(((x) >> 16) & 0x3FFF)
++#define RUVD_PKT_COUNT_C		0xC000FFFF
++#define RUVD_PKT0_BASE_INDEX_S(x)	(((x) & 0xFFFF) << 0)
++#define RUVD_PKT0_BASE_INDEX_G(x)	(((x) >> 0) & 0xFFFF)
++#define RUVD_PKT0_BASE_INDEX_C		0xFFFF0000
++#define RUVD_PKT0(index, count)		(RUVD_PKT_TYPE_S(0) | RUVD_PKT0_BASE_INDEX_S(index) | RUVD_PKT_COUNT_S(count))
++#define RUVD_PKT2()			(RUVD_PKT_TYPE_S(2))
++
++/* registers involved with UVD */
++#define RUVD_GPCOM_VCPU_CMD		0xEF0C
++#define RUVD_GPCOM_VCPU_DATA0		0xEF10
++#define RUVD_GPCOM_VCPU_DATA1		0xEF14
++#define RUVD_ENGINE_CNTL		0xEF18
++
++/* UVD commands to VCPU */
++#define RUVD_CMD_MSG_BUFFER		0x00000000
++#define RUVD_CMD_DPB_BUFFER		0x00000001
++#define RUVD_CMD_DECODING_TARGET_BUFFER	0x00000002
++#define RUVD_CMD_FEEDBACK_BUFFER	0x00000003
++#define RUVD_CMD_BITSTREAM_BUFFER	0x00000100
++
++/* UVD message types */
++#define RUVD_MSG_CREATE		0
++#define RUVD_MSG_DECODE		1
++#define RUVD_MSG_DESTROY	2
++
++/* UVD stream types */
++#define RUVD_CODEC_H264		0x00000000
++#define RUVD_CODEC_VC1		0x00000001
++#define RUVD_CODEC_MPEG2	0x00000003
++#define RUVD_CODEC_MPEG4	0x00000004
++
++/* UVD decode target buffer tiling mode */
++#define RUVD_TILE_LINEAR	0x00000000
++#define RUVD_TILE_8X4		0x00000001
++#define RUVD_TILE_8X8		0x00000002
++#define RUVD_TILE_32AS8		0x00000003
++
++/* UVD decode target buffer array mode */
++#define RUVD_ARRAY_MODE_LINEAR				0x00000000
++#define RUVD_ARRAY_MODE_MACRO_LINEAR_MICRO_TILED	0x00000001
++#define RUVD_ARRAY_MODE_1D_THIN				0x00000002
++#define RUVD_ARRAY_MODE_2D_THIN				0x00000004
++#define RUVD_ARRAY_MODE_MACRO_TILED_MICRO_LINEAR	0x00000004
++#define RUVD_ARRAY_MODE_MACRO_TILED_MICRO_TILED		0x00000005
++
++/* UVD tile config */
++#define RUVD_BANK_WIDTH(x)		((x) << 0)
++#define RUVD_BANK_HEIGHT(x)		((x) << 3)
++#define RUVD_MACRO_TILE_ASPECT_RATIO(x)	((x) << 6)
++#define RUVD_NUM_BANKS(x)		((x) << 9)
++
++/* H.264 profile definitions */
++#define RUVD_H264_PROFILE_BASELINE	0x00000000
++#define RUVD_H264_PROFILE_MAIN		0x00000001
++#define RUVD_H264_PROFILE_HIGH		0x00000002
++#define RUVD_H264_PROFILE_STEREO_HIGH	0x00000003
++#define RUVD_H264_PROFILE_MVC		0x00000004
++
++/* VC-1 profile definitions */
++#define RUVD_VC1_PROFILE_SIMPLE		0x00000000
++#define RUVD_VC1_PROFILE_MAIN		0x00000001
++#define RUVD_VC1_PROFILE_ADVANCED	0x00000002
++
++struct ruvd_mvc_element {
++	uint16_t	viewOrderIndex;
++	uint16_t	viewId;
++	uint16_t	numOfAnchorRefsInL0;
++	uint16_t	viewIdOfAnchorRefsInL0[15];
++	uint16_t	numOfAnchorRefsInL1;
++	uint16_t	viewIdOfAnchorRefsInL1[15];
++	uint16_t	numOfNonAnchorRefsInL0;
++	uint16_t	viewIdOfNonAnchorRefsInL0[15];
++	uint16_t	numOfNonAnchorRefsInL1;
++	uint16_t	viewIdOfNonAnchorRefsInL1[15];
++};
++
++struct ruvd_h264 {
++	uint32_t	profile;
++	uint32_t	level;
++
++	uint32_t	sps_info_flags;
++	uint32_t	pps_info_flags;
++	uint8_t		chroma_format;
++	uint8_t		bit_depth_luma_minus8;
++	uint8_t		bit_depth_chroma_minus8;
++	uint8_t		log2_max_frame_num_minus4;
++
++	uint8_t		pic_order_cnt_type;
++	uint8_t		log2_max_pic_order_cnt_lsb_minus4;
++	uint8_t		num_ref_frames;
++	uint8_t		reserved_8bit;
++
++	int8_t		pic_init_qp_minus26;
++	int8_t		pic_init_qs_minus26;
++	int8_t		chroma_qp_index_offset;
++	int8_t		second_chroma_qp_index_offset;
++
++	uint8_t		num_slice_groups_minus1;
++	uint8_t		slice_group_map_type;
++	uint8_t		num_ref_idx_l0_active_minus1;
++	uint8_t		num_ref_idx_l1_active_minus1;
++
++	uint16_t	slice_group_change_rate_minus1;
++	uint16_t	reserved_16bit_1;
++
++	uint8_t		scaling_list_4x4[6][16];
++	uint8_t		scaling_list_8x8[2][64];
++
++	uint32_t	frame_num;
++	uint32_t	frame_num_list[16];
++	int32_t		curr_field_order_cnt_list[2];
++	int32_t		field_order_cnt_list[16][2];
++
++	uint32_t	decoded_pic_idx;
++
++	uint32_t	curr_pic_ref_frame_num;
++
++	uint8_t		ref_frame_list[16];
++
++	uint32_t	reserved[122];
++
++	struct {
++		uint32_t			numViews;
++		uint32_t			viewId0;
++		struct ruvd_mvc_element	mvcElements[1];
++	} mvc;
++};
++
++struct ruvd_vc1 {
++	uint32_t	profile;
++	uint32_t	level;
++	uint32_t	sps_info_flags;
++	uint32_t	pps_info_flags;
++	uint32_t	pic_structure;
++	uint32_t	chroma_format;
++};
++
++struct ruvd_mpeg2 {
++	uint32_t	decoded_pic_idx;
++	uint32_t	ref_pic_idx[2];
++
++	uint8_t		load_intra_quantiser_matrix;
++	uint8_t		load_nonintra_quantiser_matrix;
++	uint8_t		reserved_quantiser_alignement[2];
++	uint8_t		intra_quantiser_matrix[64];
++	uint8_t		nonintra_quantiser_matrix[64];
++
++	uint8_t		profile_and_level_indication;
++	uint8_t		chroma_format;
++
++	uint8_t		picture_coding_type;
++
++	uint8_t		reserved_1;
++
++	uint8_t		f_code[2][2];
++	uint8_t		intra_dc_precision;
++	uint8_t		pic_structure;
++	uint8_t		top_field_first;
++	uint8_t		frame_pred_frame_dct;
++	uint8_t		concealment_motion_vectors;
++	uint8_t		q_scale_type;
++	uint8_t		intra_vlc_format;
++	uint8_t		alternate_scan;
++};
++
++struct ruvd_mpeg4
++{
++	uint32_t	decoded_pic_idx;
++	uint32_t	ref_pic_idx[2];
++
++	uint32_t	variant_type;
++	uint8_t		profile_and_level_indication;
++
++	uint8_t		video_object_layer_verid;
++	uint8_t		video_object_layer_shape;
++
++	uint8_t		reserved_1;
++
++	uint16_t	video_object_layer_width;
++	uint16_t	video_object_layer_height;
++
++	uint16_t	vop_time_increment_resolution;
++
++	uint16_t	reserved_2;
++
++	uint32_t	flags;
++
++	uint8_t		quant_type;
++
++	uint8_t		reserved_3[3];
++
++	uint8_t		intra_quant_mat[64];
++	uint8_t		nonintra_quant_mat[64];
++
++	struct {
++		uint8_t		sprite_enable;
++
++		uint8_t		reserved_4[3];
++
++		uint16_t	sprite_width;
++		uint16_t	sprite_height;
++		int16_t		sprite_left_coordinate;
++		int16_t		sprite_top_coordinate;
++
++		uint8_t		no_of_sprite_warping_points;
++		uint8_t		sprite_warping_accuracy;
++		uint8_t		sprite_brightness_change;
++		uint8_t		low_latency_sprite_enable;
++	} sprite_config;
++
++	struct {
++		uint32_t	flags;
++		uint8_t		vol_mode;
++		uint8_t		reserved_5[3];
++	} divx_311_config;
++};
++
++/* message between driver and hardware */
++struct ruvd_msg {
++
++	uint32_t	size;
++	uint32_t	msg_type;
++	uint32_t	stream_handle;
++	uint32_t	status_report_feedback_number;
++
++	union {
++		struct {
++			uint32_t	stream_type;
++			uint32_t	session_flags;
++			uint32_t	asic_id;
++			uint32_t	width_in_samples;
++			uint32_t	height_in_samples;
++			uint32_t	dpb_buffer;
++			uint32_t	dpb_size;
++			uint32_t	dpb_model;
++			uint32_t	version_info;
++		} create;
++
++		struct {
++			uint32_t	stream_type;
++			uint32_t	decode_flags;
++			uint32_t	width_in_samples;
++			uint32_t	height_in_samples;
++
++			uint32_t	dpb_buffer;
++			uint32_t	dpb_size;
++			uint32_t	dpb_model;
++			uint32_t	dpb_reserved;
++
++			uint32_t	db_offset_alignment;
++			uint32_t	db_pitch;
++			uint32_t	db_tiling_mode;
++			uint32_t	db_array_mode;
++			uint32_t	db_field_mode;
++			uint32_t	db_surf_tile_config;
++			uint32_t	db_aligned_height;
++			uint32_t	db_reserved;
++
++			uint32_t	use_addr_macro;
++
++			uint32_t	bsd_buffer;
++			uint32_t	bsd_size;
++
++			uint32_t	pic_param_buffer;
++			uint32_t	pic_param_size;
++			uint32_t	mb_cntl_buffer;
++			uint32_t	mb_cntl_size;
++
++			uint32_t	dt_buffer;
++			uint32_t	dt_pitch;
++			uint32_t	dt_tiling_mode;
++			uint32_t	dt_array_mode;
++			uint32_t	dt_field_mode;
++			uint32_t	dt_luma_top_offset;
++			uint32_t	dt_luma_bottom_offset;
++			uint32_t	dt_chroma_top_offset;
++			uint32_t	dt_chroma_bottom_offset;
++			uint32_t	dt_surf_tile_config;
++			uint32_t	dt_reserved[3];
++
++			uint32_t	reserved[16];
++
++			union {
++				struct ruvd_h264	h264;
++				struct ruvd_vc1		vc1;
++				struct ruvd_mpeg2	mpeg2;
++				struct ruvd_mpeg4	mpeg4;
++
++				uint32_t codec_info[768];
++			} ;
++
++			uint8_t		extension_support;
++			uint8_t		reserved_8bit_1;
++			uint8_t		reserved_8bit_2;
++			uint8_t		reserved_8bit_3;
++			uint32_t	extension_reserved[64];
++		} decode;
++	};
++};
++
++/* driver dependent callback */
++typedef struct radeon_winsys_cs_handle* (*ruvd_set_dtb)
++(struct ruvd_msg* msg, struct vl_video_buffer *vb);
++
++/* create an UVD decode */
++struct pipe_video_decoder *ruvd_create_decoder(struct pipe_context *context,
++					       enum pipe_video_profile profile,
++					       enum pipe_video_entrypoint entrypoint,
++					       enum pipe_video_chroma_format chroma_format,
++					       unsigned width, unsigned height,
++					       unsigned max_references, bool expect_chunked_decode,
++					       struct radeon_winsys* ws,
++					       ruvd_set_dtb set_dtb);
++
++/* join surfaces into the same buffer with identical tiling params
++   sumup their sizes and replace the backend buffers with a single bo */
++void ruvd_join_surfaces(struct radeon_winsys* ws, unsigned bind,
++			struct pb_buffer** buffers[VL_NUM_COMPONENTS],
++			struct radeon_surface *surfaces[VL_NUM_COMPONENTS]);
++
++/* fill decoding target field from the luma and chroma surfaces */
++void ruvd_set_dt_surfaces(struct ruvd_msg *msg, struct radeon_surface *luma,
++			  struct radeon_surface *chroma);
++
++/* returns supported codecs and other parameters */
++int ruvd_get_video_param(struct pipe_screen *screen,
++			 enum pipe_video_profile profile,
++			 enum pipe_video_cap param);
++
++/* the hardware only supports NV12 */
++boolean ruvd_is_format_supported(struct pipe_screen *screen,
++				 enum pipe_format format,
++				 enum pipe_video_profile profile);
++
++#endif
+diff --git a/src/gallium/drivers/radeonsi/Makefile.am b/src/gallium/drivers/radeonsi/Makefile.am
+index e771d31..df2870e 100644
+--- a/src/gallium/drivers/radeonsi/Makefile.am
++++ b/src/gallium/drivers/radeonsi/Makefile.am
+@@ -33,4 +33,6 @@ AM_CPPFLAGS = \
+ AM_CFLAGS = $(LLVM_CFLAGS)
+ 
+ libradeonsi_la_SOURCES = $(C_SOURCES)
+-libradeonsi_la_LIBADD = ../radeon/libllvmradeon at VERSION@.la
++libradeonsi_la_LIBADD = \
++	../radeon/libradeon.la \
++	../radeon/libllvmradeon at VERSION@.la
+diff --git a/src/gallium/drivers/radeonsi/Makefile.sources b/src/gallium/drivers/radeonsi/Makefile.sources
+index 5e1cc4f..b3ffa72 100644
+--- a/src/gallium/drivers/radeonsi/Makefile.sources
++++ b/src/gallium/drivers/radeonsi/Makefile.sources
+@@ -13,4 +13,5 @@ C_SOURCES := \
+ 	si_state.c \
+ 	si_state_streamout.c \
+ 	si_state_draw.c \
+-	si_commands.c
++	si_commands.c \
++	radeonsi_uvd.c
+diff --git a/src/gallium/drivers/radeonsi/radeonsi_pipe.c b/src/gallium/drivers/radeonsi/radeonsi_pipe.c
+index f668d8b..5c25b2f 100644
+--- a/src/gallium/drivers/radeonsi/radeonsi_pipe.c
++++ b/src/gallium/drivers/radeonsi/radeonsi_pipe.c
+@@ -43,6 +43,8 @@
+ #include "vl/vl_video_buffer.h"
+ #include "os/os_time.h"
+ #include "pipebuffer/pb_buffer.h"
++#include "radeonsi_pipe.h"
++#include "radeon/radeon_uvd.h"
+ #include "r600.h"
+ #include "sid.h"
+ #include "r600_resource.h"
+@@ -219,8 +221,13 @@ static struct pipe_context *r600_create_context(struct pipe_screen *screen, void
+ 	si_init_surface_functions(rctx);
+ 	si_init_compute_functions(rctx);
+ 
+-	rctx->context.create_video_decoder = vl_create_decoder;
+-	rctx->context.create_video_buffer = vl_video_buffer_create;
++	if (rscreen->info.has_uvd) {
++		rctx->context.create_video_decoder = radeonsi_uvd_create_decoder;
++		rctx->context.create_video_buffer = radeonsi_video_buffer_create;
++	} else {
++		rctx->context.create_video_decoder = vl_create_decoder;
++		rctx->context.create_video_buffer = vl_video_buffer_create;
++	}
+ 
+ 	switch (rctx->chip_class) {
+ 	case TAHITI:
+@@ -784,16 +791,22 @@ struct pipe_screen *radeonsi_screen_create(struct radeon_winsys *ws)
+ 	rscreen->screen.get_param = r600_get_param;
+ 	rscreen->screen.get_shader_param = r600_get_shader_param;
+ 	rscreen->screen.get_paramf = r600_get_paramf;
+-	rscreen->screen.get_video_param = r600_get_video_param;
+ 	rscreen->screen.get_compute_param = r600_get_compute_param;
+ 	rscreen->screen.is_format_supported = si_is_format_supported;
+-	rscreen->screen.is_video_format_supported = vl_video_buffer_is_format_supported;
+ 	rscreen->screen.context_create = r600_create_context;
+ 	rscreen->screen.fence_reference = r600_fence_reference;
+ 	rscreen->screen.fence_signalled = r600_fence_signalled;
+ 	rscreen->screen.fence_finish = r600_fence_finish;
+ 	r600_init_screen_resource_functions(&rscreen->screen);
+ 
++	if (rscreen->info.has_uvd) {
++		rscreen->screen.get_video_param = ruvd_get_video_param;
++		rscreen->screen.is_video_format_supported = ruvd_is_format_supported;
++	} else {
++		rscreen->screen.get_video_param = r600_get_video_param;
++		rscreen->screen.is_video_format_supported = vl_video_buffer_is_format_supported;
++	}
++
+ 	util_format_s3tc_init();
+ 
+ 	rscreen->fences.bo = NULL;
+diff --git a/src/gallium/drivers/radeonsi/radeonsi_pipe.h b/src/gallium/drivers/radeonsi/radeonsi_pipe.h
+index 0dff697..388f6df 100644
+--- a/src/gallium/drivers/radeonsi/radeonsi_pipe.h
++++ b/src/gallium/drivers/radeonsi/radeonsi_pipe.h
+@@ -249,6 +249,17 @@ void r600_trace_emit(struct r600_context *rctx);
+ /* radeonsi_compute.c */
+ void si_init_compute_functions(struct r600_context *rctx);
+ 
++/* radeonsi_uvd.c */
++struct pipe_video_decoder *radeonsi_uvd_create_decoder(struct pipe_context *context,
++						       enum pipe_video_profile profile,
++						       enum pipe_video_entrypoint entrypoint,
++						       enum pipe_video_chroma_format chroma_format,
++						       unsigned width, unsigned height,
++						       unsigned max_references, bool expect_chunked_decode);
++
++struct pipe_video_buffer *radeonsi_video_buffer_create(struct pipe_context *pipe,
++						       const struct pipe_video_buffer *tmpl);
++
+ /*
+  * common helpers
+  */
+diff --git a/src/gallium/drivers/radeonsi/radeonsi_uvd.c b/src/gallium/drivers/radeonsi/radeonsi_uvd.c
+new file mode 100644
+index 0000000..d49c088
+--- /dev/null
++++ b/src/gallium/drivers/radeonsi/radeonsi_uvd.c
+@@ -0,0 +1,160 @@
++/**************************************************************************
++ *
++ * Copyright 2011 Advanced Micro Devices, Inc.
++ * All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sub license, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial portions
++ * of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
++ * IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) OR AUTHOR(S) BE LIABLE FOR
++ * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ *
++ **************************************************************************/
++
++/*
++ * Authors:
++ *      Christian König <christian.koenig at amd.com>
++ *
++ */
++
++#include <sys/types.h>
++#include <assert.h>
++#include <errno.h>
++#include <unistd.h>
++
++#include "pipe/p_video_decoder.h"
++
++#include "util/u_memory.h"
++#include "util/u_video.h"
++
++#include "vl/vl_defines.h"
++#include "vl/vl_mpeg12_decoder.h"
++
++#include "radeonsi_pipe.h"
++#include "radeon/radeon_uvd.h"
++#include "sid.h"
++
++/**
++ * creates an video buffer with an UVD compatible memory layout
++ */
++struct pipe_video_buffer *radeonsi_video_buffer_create(struct pipe_context *pipe,
++						       const struct pipe_video_buffer *tmpl)
++{
++	struct r600_context *ctx = (struct r600_context *)pipe;
++	struct r600_resource_texture *resources[VL_NUM_COMPONENTS] = {};
++	struct radeon_surface *surfaces[VL_NUM_COMPONENTS] = {};
++	struct pb_buffer **pbs[VL_NUM_COMPONENTS] = {};
++	const enum pipe_format *resource_formats;
++	struct pipe_video_buffer template;
++	struct pipe_resource templ;
++	unsigned i, depth;
++
++	assert(pipe);
++
++	/* first create the needed resources as "normal" textures */
++	resource_formats = vl_video_buffer_formats(pipe->screen, tmpl->buffer_format);
++	if (!resource_formats)
++		return NULL;
++
++	depth = tmpl->interlaced ? 2 : 1;
++	template = *tmpl;
++	template.width = align(tmpl->width, VL_MACROBLOCK_WIDTH);
++	template.height = align(tmpl->height / depth, VL_MACROBLOCK_HEIGHT);
++
++	vl_vide_buffer_template(&templ, &template, resource_formats[0], depth, PIPE_USAGE_STATIC, 0);
++	resources[0] = (struct r600_resource_texture *)
++		pipe->screen->resource_create(pipe->screen, &templ);
++	if (!resources[0])
++		goto error;
++
++	if (resource_formats[1] != PIPE_FORMAT_NONE) {
++		vl_vide_buffer_template(&templ, &template, resource_formats[1], depth, PIPE_USAGE_STATIC, 1);
++		resources[1] = (struct r600_resource_texture *)
++			pipe->screen->resource_create(pipe->screen, &templ);
++		if (!resources[1])
++			goto error;
++	}
++
++	if (resource_formats[2] != PIPE_FORMAT_NONE) {
++		vl_vide_buffer_template(&templ, &template, resource_formats[2], depth, PIPE_USAGE_STATIC, 2);
++		resources[2] = (struct r600_resource_texture *)
++			pipe->screen->resource_create(pipe->screen, &templ);
++		if (!resources[2])
++			goto error;
++	}
++
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!resources[i])
++			continue;
++
++		surfaces[i] = & resources[i]->surface;
++		pbs[i] = &resources[i]->resource.buf;
++	}
++
++	ruvd_join_surfaces(ctx->ws, templ.bind, pbs, surfaces);
++
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i) {
++		if (!resources[i])
++			continue;
++
++		/* recreate the CS handle */
++		resources[i]->resource.cs_buf = ctx->ws->buffer_get_cs_handle(
++			resources[i]->resource.buf);
++
++		/* TODO: tiling used to work with UVD on SI */
++		resources[i]->surface.level[0].mode = RADEON_SURF_MODE_LINEAR_ALIGNED;
++	}
++
++	template.height *= depth;
++	return vl_video_buffer_create_ex2(pipe, &template, (struct pipe_resource **)resources);
++
++error:
++	for (i = 0; i < VL_NUM_COMPONENTS; ++i)
++		pipe_resource_reference((struct pipe_resource **)&resources[i], NULL);
++
++	return NULL;
++}
++
++/* set the decoding target buffer offsets */
++static struct radeon_winsys_cs_handle* radeonsi_uvd_set_dtb(struct ruvd_msg *msg, struct vl_video_buffer *buf)
++{
++	struct r600_resource_texture *luma = (struct r600_resource_texture *)buf->resources[0];
++	struct r600_resource_texture *chroma = (struct r600_resource_texture *)buf->resources[1];
++
++	msg->decode.dt_field_mode = buf->base.interlaced;
++
++	ruvd_set_dt_surfaces(msg, &luma->surface, &chroma->surface);
++
++	return luma->resource.cs_buf;
++}
++
++/**
++ * creates an UVD compatible decoder
++ */
++struct pipe_video_decoder *radeonsi_uvd_create_decoder(struct pipe_context *context,
++						       enum pipe_video_profile profile,
++						       enum pipe_video_entrypoint entrypoint,
++						       enum pipe_video_chroma_format chroma_format,
++						       unsigned width, unsigned height,
++						       unsigned max_references, bool expect_chunked_decode)
++{
++	struct r600_context *ctx = (struct r600_context *)context;
++
++	return ruvd_create_decoder(context, profile, entrypoint, chroma_format,
++				   width, height, max_references, expect_chunked_decode,
++				   ctx->ws, radeonsi_uvd_set_dtb);
++}
+

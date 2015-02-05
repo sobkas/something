@@ -1,0 +1,19 @@
+diff --git a/src/gallium/drivers/r600/r600_shader.c b/src/gallium/drivers/r600/r600_shader.c
+index 84821ac..9c8023d 100644
+--- a/src/gallium/drivers/r600/r600_shader.c
++++ b/src/gallium/drivers/r600/r600_shader.c
+@@ -1258,14 +1258,6 @@ static int r600_shader_from_tgsi(struct r600_screen *rscreen,
+ 		ctx.file_offset[TGSI_FILE_INPUT] = evergreen_gpr_count(&ctx);
+ 	}
+ 
+-#ifdef R600_USE_LLVM
+-	if (use_llvm && ctx.info.indirect_files) {
+-		fprintf(stderr, "Warning: R600 LLVM backend does not support "
+-				"indirect adressing.  Falling back to TGSI "
+-				"backend.\n");
+-		use_llvm = 0;
+-	}
+-#endif
+ 	ctx.use_llvm = use_llvm;
+ 
+ 	if (use_llvm) {

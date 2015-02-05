@@ -1,0 +1,174 @@
+From e3fb721658e91ac41c8e0db71139c4734105c2e6 Mon Sep 17 00:00:00 2001
+From: Vadim Girlin <vadimgirlin@gmail.com>
+Date: Mon, 14 Oct 2013 17:19:12 +0400
+Subject: [PATCH] r600g/sb: fix issue with DCE between GVN and GCM (v2)
+
+We can't perform DCE using the liveness pass between GVN and GCM
+because it relies on the correct schedule, but GVN doesn't care about
+preserving correctness - it's rescheduled later by GCM.
+
+This patch makes dce_cleanup pass perform simple DCE
+between GVN and GCM instead of relying on liveness pass.
+
+Fixes https://bugs.freedesktop.org/show_bug.cgi?id=70088
+
+Signed-off-by: Vadim Girlin <vadimgirlin@gmail.com>
+---
+ src/gallium/drivers/r600/sb/sb_core.cpp        | 10 ++++++++--
+ src/gallium/drivers/r600/sb/sb_dce_cleanup.cpp | 22 ++++++++++++++--------
+ src/gallium/drivers/r600/sb/sb_pass.h          |  7 +++++--
+ src/gallium/drivers/r600/sb/sb_shader.h        | 12 ++++++++++++
+ 4 files changed, 39 insertions(+), 12 deletions(-)
+
+diff --git a/src/gallium/drivers/r600/sb/sb_core.cpp b/src/gallium/drivers/r600/sb/sb_core.cpp
+index b5dd88e..9fd9d9a 100644
+--- a/src/gallium/drivers/r600/sb/sb_core.cpp
++++ b/src/gallium/drivers/r600/sb/sb_core.cpp
+@@ -184,6 +184,8 @@ int r600_sb_bytecode_process(struct r600_context *rctx,
+ 		SB_RUN_PASS(psi_ops,		1);
+ 
+ 	SB_RUN_PASS(liveness,			0);
++
++	sh->dce_flags = DF_REMOVE_DEAD | DF_EXPAND;
+ 	SB_RUN_PASS(dce_cleanup,		0);
+ 	SB_RUN_PASS(def_use,			0);
+ 
+@@ -201,9 +203,10 @@ int r600_sb_bytecode_process(struct r600_context *rctx,
+ 
+ 	SB_RUN_PASS(gvn,				1);
+ 
+-	SB_RUN_PASS(liveness,			0);
++	SB_RUN_PASS(def_use,			1);
++
++	sh->dce_flags = DF_REMOVE_DEAD | DF_REMOVE_UNUSED;
+ 	SB_RUN_PASS(dce_cleanup,		1);
+-	SB_RUN_PASS(def_use,			0);
+ 
+ 	SB_RUN_PASS(ra_split,			0);
+ 	SB_RUN_PASS(def_use,			0);
+@@ -217,6 +220,9 @@ int r600_sb_bytecode_process(struct r600_context *rctx,
+ 	sh->compute_interferences = true;
+ 	SB_RUN_PASS(liveness,			0);
+ 
++	sh->dce_flags = DF_REMOVE_DEAD;
++	SB_RUN_PASS(dce_cleanup,		1);
++
+ 	SB_RUN_PASS(ra_coalesce,		1);
+ 	SB_RUN_PASS(ra_init,			1);
+ 
+diff --git a/src/gallium/drivers/r600/sb/sb_dce_cleanup.cpp b/src/gallium/drivers/r600/sb/sb_dce_cleanup.cpp
+index f879395..79aef91 100644
+--- a/src/gallium/drivers/r600/sb/sb_dce_cleanup.cpp
++++ b/src/gallium/drivers/r600/sb/sb_dce_cleanup.cpp
+@@ -56,7 +56,8 @@ bool dce_cleanup::visit(cf_node& n, bool enter) {
+ 		else
+ 			cleanup_dst(n);
+ 	} else {
+-		if (n.bc.op_ptr->flags & (CF_CLAUSE | CF_BRANCH | CF_LOOP))
++		if ((sh.dce_flags & DF_EXPAND) &&
++				(n.bc.op_ptr->flags & (CF_CLAUSE | CF_BRANCH | CF_LOOP)))
+ 			n.expand();
+ 	}
+ 	return true;
+@@ -107,19 +108,20 @@ bool dce_cleanup::visit(region_node& n, bool enter) {
+ }
+ 
+ void dce_cleanup::cleanup_dst(node& n) {
+-	cleanup_dst_vec(n.dst);
++	if (!cleanup_dst_vec(n.dst) && remove_unused &&
++			!n.dst.empty() && !(n.flags & NF_DONT_KILL) && n.parent)
++		n.remove();
+ }
+ 
+ bool dce_cleanup::visit(container_node& n, bool enter) {
+-	if (enter) {
++	if (enter)
+ 		cleanup_dst(n);
+-	} else {
+-
+-	}
+ 	return true;
+ }
+ 
+-void dce_cleanup::cleanup_dst_vec(vvec& vv) {
++bool dce_cleanup::cleanup_dst_vec(vvec& vv) {
++	bool alive = false;
++
+ 	for (vvec::iterator I = vv.begin(), E = vv.end(); I != E; ++I) {
+ 		value* &v = *I;
+ 		if (!v)
+@@ -128,9 +130,13 @@ void dce_cleanup::cleanup_dst_vec(vvec& vv) {
+ 		if (v->gvn_source && v->gvn_source->is_dead())
+ 			v->gvn_source = NULL;
+ 
+-		if (v->is_dead())
++		if (v->is_dead() || (remove_unused && !v->is_rel() && !v->uses))
+ 			v = NULL;
++		else
++			alive = true;
+ 	}
++
++	return alive;
+ }
+ 
+ } // namespace r600_sb
+diff --git a/src/gallium/drivers/r600/sb/sb_pass.h b/src/gallium/drivers/r600/sb/sb_pass.h
+index 95d2a20..a3f8515 100644
+--- a/src/gallium/drivers/r600/sb/sb_pass.h
++++ b/src/gallium/drivers/r600/sb/sb_pass.h
+@@ -119,9 +119,12 @@ public:
+ class dce_cleanup : public vpass {
+ 	using vpass::visit;
+ 
++	bool remove_unused;
++
+ public:
+ 
+-	dce_cleanup(shader &s) : vpass(s) {}
++	dce_cleanup(shader &s) : vpass(s),
++		remove_unused(s.dce_flags & DF_REMOVE_UNUSED) {}
+ 
+ 	virtual bool visit(node &n, bool enter);
+ 	virtual bool visit(alu_group_node &n, bool enter);
+@@ -135,7 +138,7 @@ public:
+ private:
+ 
+ 	void cleanup_dst(node &n);
+-	void cleanup_dst_vec(vvec &vv);
++	bool cleanup_dst_vec(vvec &vv);
+ 
+ };
+ 
+diff --git a/src/gallium/drivers/r600/sb/sb_shader.h b/src/gallium/drivers/r600/sb/sb_shader.h
+index e515d31..7955bba 100644
+--- a/src/gallium/drivers/r600/sb/sb_shader.h
++++ b/src/gallium/drivers/r600/sb/sb_shader.h
+@@ -71,6 +71,16 @@ enum chunk_flags {
+ 	RCF_PREALLOC = (1 << 4)
+ };
+ 
++enum dce_flags {
++	DF_REMOVE_DEAD  = (1 << 0),
++	DF_REMOVE_UNUSED = (1 << 1),
++	DF_EXPAND = (1 << 2),
++};
++
++inline dce_flags operator |(dce_flags l, dce_flags r) {
++	return (dce_flags)((unsigned)l|(unsigned)r);
++}
++
+ inline chunk_flags operator |(chunk_flags l, chunk_flags r) {
+ 	return (chunk_flags)((unsigned)l|(unsigned)r);
+ }
+@@ -297,6 +307,8 @@ public:
+ 
+ 	unsigned ngpr, nstack;
+ 
++	unsigned dce_flags;
++
+ 	shader(sb_context &sctx, shader_target t, unsigned id);
+ 
+ 	~shader();
+-- 
+1.8.3.1
+

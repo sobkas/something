@@ -1,0 +1,13 @@
+diff --git a/src/gallium/drivers/r600/r600_state_common.c b/src/gallium/drivers/r600/r600_state_common.c
+index 4995c81..69bf08f 100644
+--- a/src/gallium/drivers/r600/r600_state_common.c
++++ b/src/gallium/drivers/r600/r600_state_common.c
+@@ -588,7 +588,7 @@ static void r600_set_sampler_views(struct pipe_context *pipe, unsigned shader,
+ 		i = u_bit_scan(&remaining_mask);
+ 		assert(dst->views.views[i]);
+ 
+-		pipe_sampler_view_reference((struct pipe_sampler_view **)&dst->views.views[i], NULL);
++		pipe_sampler_view_release(pipe, (struct pipe_sampler_view **)&dst->views.views[i]);
+ 	}
+ 
+ 	for (i = 0; i < count; i++) {

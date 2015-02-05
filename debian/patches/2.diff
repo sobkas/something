@@ -1,0 +1,544 @@
+htile is used for HiZ and HiS support and fast Z/S clears.
+This commit just adds the htile setup and Fast Z clear.
+We don't take full advantage of HiS with that patch.
+
+v2 really use fast clear, still random issue with some tiles
+   need to try more flush combination, fix depth/stencil
+   texture decompression
+v3 fix random issue on r6xx/r7xx
+v4 rebase on top of lastest mesa, disable CB export when clearing
+   htile surface to avoid wasting bandwidth
+v5 resummarize htile surface when uploading z value. Fix z/stencil
+   decompression, the custom blitter with custom dsa is no longer
+   needed.
+v6 Reorganize render control/override update mecanism, fixing more
+   issues in the process.
+v7 Add nop after depth surface base update to work around some htile
+   flushing issue. For htile to 8x8 on r6xx/r7xx as other combination
+   have issue. Do not enable hyperz when flushing/uncompressing
+   depth buffer.
+v8 Fix htile surface, preload and prefetch setup. Only set preload
+   and prefetch on htile surface clear like fglrx. Record depth
+   clear value per level. Support several level for the htile
+   surface. First depth clear can't be a fast clear.
+v9 Fix comments, properly account new register in emit function,
+   disable fast zclear if clearing different layer of texture
+   array to different value
+v10 Disable hyperz for texture array making test simpler. Force
+    db_misc_state update when no depth buffer is bound. Remove
+    unused variable, rename depth_clearstencil to depth_clear.
+    Don't allocate htile surface for flushed depth. Something
+    broken the cliprect change, this need to be investigated.
+v11 Rebase on top of newer mesa
+v12 Rebase on top of newer mesa
+v13 Rebase on top of newer mesa, htile surface need to be initialized
+    to zero, somehow special casing first clear to not use fast clear
+    and thus initialize the htile surface with proper value does not
+    work in all case.
+v14 Use resource not texture for htile buffer make the htile buffer
+    size computation easier and simpler. Disable preload on evergreen
+    as its still troublesome in some case
+
+Signed-off-by: Pierre-Eric Pelloux-Prayer <pelloux@gmail.com>
+Signed-off-by: Alex Deucher <alexander.deucher@amd.com>
+Signed-off-by: Jerome Glisse <jglisse@redhat.com>
+---
+ src/gallium/drivers/r600/evergreen_state.c | 65 ++++++++++++++++++++++++++----
+ src/gallium/drivers/r600/evergreend.h      |  2 +
+ src/gallium/drivers/r600/r600_blit.c       | 28 +++++++++++++
+ src/gallium/drivers/r600/r600_hw_context.c |  1 +
+ src/gallium/drivers/r600/r600_pipe.c       | 10 +++++
+ src/gallium/drivers/r600/r600_pipe.h       | 26 +++++++-----
+ src/gallium/drivers/r600/r600_resource.h   |  9 +++++
+ src/gallium/drivers/r600/r600_state.c      | 58 ++++++++++++++++++++++++--
+ src/gallium/drivers/r600/r600_texture.c    | 39 ++++++++++++++++++
+ src/gallium/drivers/r600/r600d.h           |  1 +
+ 10 files changed, 218 insertions(+), 21 deletions(-)
+
+diff --git a/src/gallium/drivers/r600/evergreen_state.c b/src/gallium/drivers/r600/evergreen_state.c
+index 58964c4..39de55b 100644
+--- a/src/gallium/drivers/r600/evergreen_state.c
++++ b/src/gallium/drivers/r600/evergreen_state.c
+@@ -1545,6 +1545,18 @@ static void evergreen_init_depth_surface(struct r600_context *rctx,
+ 					S_028044_FORMAT(V_028044_STENCIL_8);
+ 	}
+ 
++	surf->htile_enabled = 0;
++	/* use htile only for first level */
++	if (rtex->htile && !level) {
++		surf->htile_enabled = 1;
++		surf->db_htile_data_base = 0;
++		surf->db_htile_surface = S_028ABC_HTILE_WIDTH(1) |
++					S_028ABC_HTILE_HEIGHT(1) |
++					S_028ABC_LINEAR(1);
++		surf->db_depth_info |= S_028040_TILE_SURFACE_ENABLE(1);
++		surf->db_preload_control = 0;
++	}
++
+ 	surf->depth_initialized = true;
+ }
+ 
+@@ -1625,6 +1637,16 @@ static void evergreen_set_framebuffer_state(struct pipe_context *ctx,
+ 			rctx->poly_offset_state.zs_format = state->zsbuf->format;
+ 			rctx->poly_offset_state.atom.dirty = true;
+ 		}
++
++		if (rctx->db_state.rsurf != surf) {
++			rctx->db_state.rsurf = surf;
++			rctx->db_state.atom.dirty = true;
++			rctx->db_misc_state.atom.dirty = true;
++		}
++	} else if (rctx->db_state.rsurf) {
++		rctx->db_state.rsurf = NULL;
++		rctx->db_state.atom.dirty = true;
++		rctx->db_misc_state.atom.dirty = true;
+ 	}
+ 
+ 	if (rctx->cb_misc_state.nr_cbufs != state->nr_cbufs) {
+@@ -2081,6 +2103,28 @@ static void evergreen_emit_cb_misc_state(struct r600_context *rctx, struct r600_
+ 	r600_write_value(cs, 0xf | (a->dual_src_blend ? ps_colormask : 0) | fb_colormask); /* R_02823C_CB_SHADER_MASK */
+ }
+ 
++static void evergreen_emit_db_state(struct r600_context *rctx, struct r600_atom *atom)
++{
++	struct radeon_winsys_cs *cs = rctx->cs;
++	struct r600_db_state *a = (struct r600_db_state*)atom;
++
++	if (a->rsurf && a->rsurf->htile_enabled) {
++		struct r600_texture *rtex = (struct r600_texture *)a->rsurf->base.texture;
++		unsigned reloc_idx;
++
++		r600_write_context_reg(cs, R_02802C_DB_DEPTH_CLEAR, fui(rtex->depth_clear));
++		r600_write_context_reg(cs, R_028ABC_DB_HTILE_SURFACE, a->rsurf->db_htile_surface);
++		r600_write_context_reg(cs, R_028AC8_DB_PRELOAD_CONTROL, a->rsurf->db_preload_control);
++		r600_write_context_reg(cs, R_028014_DB_HTILE_DATA_BASE, a->rsurf->db_htile_data_base);
++		reloc_idx = r600_context_bo_reloc(rctx, rtex->htile, RADEON_USAGE_READWRITE);
++		cs->buf[cs->cdw++] = PKT3(PKT3_NOP, 0, 0);
++		cs->buf[cs->cdw++] = reloc_idx;
++	} else {
++		r600_write_context_reg(cs, R_028ABC_DB_HTILE_SURFACE, 0);
++		r600_write_context_reg(cs, R_028AC8_DB_PRELOAD_CONTROL, 0);
++	}
++}
++
+ static void evergreen_emit_db_misc_state(struct r600_context *rctx, struct r600_atom *atom)
+ {
+ 	struct radeon_winsys_cs *cs = rctx->cs;
+@@ -2088,7 +2132,6 @@ static void evergreen_emit_db_misc_state(struct r600_context *rctx, struct r600_
+ 	unsigned db_render_control = 0;
+ 	unsigned db_count_control = 0;
+ 	unsigned db_render_override =
+-		S_02800C_FORCE_HIZ_ENABLE(V_02800C_FORCE_DISABLE) |
+ 		S_02800C_FORCE_HIS_ENABLE0(V_02800C_FORCE_DISABLE) |
+ 		S_02800C_FORCE_HIS_ENABLE1(V_02800C_FORCE_DISABLE);
+ 
+@@ -2099,7 +2142,12 @@ static void evergreen_emit_db_misc_state(struct r600_context *rctx, struct r600_
+ 		}
+ 		db_render_override |= S_02800C_NOOP_CULL_DISABLE(1);
+ 	}
+-
++	if (rctx->db_state.rsurf && rctx->db_state.rsurf->htile_enabled) {
++		/* FORCE_OFF means HiZ/HiS are determined by DB_SHADER_CONTROL */
++		db_render_override |= S_02800C_FORCE_HIZ_ENABLE(V_02800C_FORCE_OFF);
++	} else {
++		db_render_override |= S_02800C_FORCE_HIZ_ENABLE(V_02800C_FORCE_DISABLE);
++	}
+ 	if (a->flush_depthstencil_through_cb) {
+ 		assert(a->copy_depth || a->copy_stencil);
+ 
+@@ -2112,6 +2160,10 @@ static void evergreen_emit_db_misc_state(struct r600_context *rctx, struct r600_
+ 				     S_028000_STENCIL_COMPRESS_DISABLE(1);
+ 		db_render_override |= S_02800C_DISABLE_PIXEL_RATE_TILES(1);
+ 	}
++	if (a->htile_clear) {
++		/* FIXME we might want to disable cliprect here */
++		db_render_control |= S_028000_DEPTH_CLEAR_ENABLE(1);
++	}
+ 
+ 	r600_write_context_reg_seq(cs, R_028000_DB_RENDER_CONTROL, 2);
+ 	r600_write_value(cs, db_render_control); /* R_028000_DB_RENDER_CONTROL */
+@@ -2424,6 +2476,7 @@ void evergreen_init_state_functions(struct r600_context *rctx)
+ 	r600_init_atom(rctx, &rctx->clip_misc_state.atom, id++, r600_emit_clip_misc_state, 6);
+ 	r600_init_atom(rctx, &rctx->clip_state.atom, id++, evergreen_emit_clip_state, 26);
+ 	r600_init_atom(rctx, &rctx->db_misc_state.atom, id++, evergreen_emit_db_misc_state, 10);
++	r600_init_atom(rctx, &rctx->db_state.atom, id++, evergreen_emit_db_state, 15);
+ 	r600_init_atom(rctx, &rctx->dsa_state.atom, id++, r600_emit_cso_state, 0);
+ 	r600_init_atom(rctx, &rctx->poly_offset_state.atom, id++, evergreen_emit_polygon_offset, 6);
+ 	r600_init_atom(rctx, &rctx->rasterizer_state.atom, id++, r600_emit_cso_state, 0);
+@@ -2544,9 +2597,7 @@ static void cayman_init_atom_start_cs(struct r600_context *rctx)
+ 
+ 	r600_store_ctl_const(cb, R_03CFF0_SQ_VTX_BASE_VTX_LOC, 0);
+ 
+-	r600_store_context_reg_seq(cb, R_028028_DB_STENCIL_CLEAR, 2);
+-	r600_store_value(cb, 0); /* R_028028_DB_STENCIL_CLEAR */
+-	r600_store_value(cb, 0x3F800000); /* R_02802C_DB_DEPTH_CLEAR */
++	r600_store_context_reg(cb, R_028028_DB_STENCIL_CLEAR, 0);
+ 
+ 	r600_store_context_reg(cb, R_0286DC_SPI_FOG_CNTL, 0);
+ 
+@@ -2992,9 +3043,7 @@ void evergreen_init_atom_start_cs(struct r600_context *rctx)
+ 
+ 	r600_store_ctl_const(cb, R_03CFF0_SQ_VTX_BASE_VTX_LOC, 0);
+ 
+-	r600_store_context_reg_seq(cb, R_028028_DB_STENCIL_CLEAR, 2);
+-	r600_store_value(cb, 0); /* R_028028_DB_STENCIL_CLEAR */
+-	r600_store_value(cb, 0x3F800000); /* R_02802C_DB_DEPTH_CLEAR */
++	r600_store_context_reg(cb, R_028028_DB_STENCIL_CLEAR, 0);
+ 
+ 	r600_store_context_reg(cb, R_028200_PA_SC_WINDOW_OFFSET, 0);
+ 	r600_store_context_reg(cb, R_02820C_PA_SC_CLIPRECT_RULE, 0xFFFF);
+diff --git a/src/gallium/drivers/r600/evergreend.h b/src/gallium/drivers/r600/evergreend.h
+index c91b2d8..d9dba95 100644
+--- a/src/gallium/drivers/r600/evergreend.h
++++ b/src/gallium/drivers/r600/evergreend.h
+@@ -1888,6 +1888,8 @@
+ #define R_028AC0_DB_SRESULTS_COMPARE_STATE0          0x00028AC0
+ #define R_028AC4_DB_SRESULTS_COMPARE_STATE1          0x00028AC4
+ #define R_028AC8_DB_PRELOAD_CONTROL                  0x00028AC8
++#define   S_028AC8_MAX_X(x)                            (((x) & 0xff) << 16)
++#define   S_028AC8_MAX_Y(x)                            (((x) & 0xff) << 24)
+ #define R_028AD0_VGT_STRMOUT_BUFFER_SIZE_0	     0x028AD0
+ #define R_028AD4_VGT_STRMOUT_VTX_STRIDE_0	     0x028AD4
+ #define R_028AD8_VGT_STRMOUT_BUFFER_BASE_0	     0x028AD8
+diff --git a/src/gallium/drivers/r600/r600_blit.c b/src/gallium/drivers/r600/r600_blit.c
+index f702f7b..6a83053 100644
+--- a/src/gallium/drivers/r600/r600_blit.c
++++ b/src/gallium/drivers/r600/r600_blit.c
+@@ -449,11 +449,39 @@ static void r600_clear(struct pipe_context *ctx, unsigned buffers,
+ 	struct r600_context *rctx = (struct r600_context *)ctx;
+ 	struct pipe_framebuffer_state *fb = &rctx->framebuffer.state;
+ 
++	/* if hyperz enabled just clear hyperz */
++	if (fb->zsbuf && (buffers & PIPE_CLEAR_DEPTH)) {
++		struct r600_texture *rtex;
++		unsigned level = fb->zsbuf->u.tex.level;
++
++		rtex = (struct r600_texture*)fb->zsbuf->texture;
++
++		/* We can't use hyperz fast clear if each slice of a texture
++		 * array are clear to different value. To simplify code just
++		 * disable fast clear for texture array.
++		 */
++		/* Only use htile for first level */
++		if (rtex->htile && !level && rtex->surface.array_size == 1) {
++			if (rtex->depth_clear != depth) {
++				rtex->depth_clear = depth;
++				rctx->db_state.atom.dirty = true;
++			}
++			rctx->db_misc_state.htile_clear = true;
++			rctx->db_misc_state.atom.dirty = true;
++		}
++	}
++
+ 	r600_blitter_begin(ctx, R600_CLEAR);
+ 	util_blitter_clear(rctx->blitter, fb->width, fb->height,
+ 			   fb->nr_cbufs, buffers, fb->nr_cbufs ? fb->cbufs[0]->format : PIPE_FORMAT_NONE,
+ 			   color, depth, stencil);
+ 	r600_blitter_end(ctx);
++
++	/* disable fast clear */
++	if (rctx->db_misc_state.htile_clear) {
++		rctx->db_misc_state.htile_clear = false;
++		rctx->db_misc_state.atom.dirty = true;
++	}
+ }
+ 
+ static void r600_clear_render_target(struct pipe_context *ctx,
+diff --git a/src/gallium/drivers/r600/r600_hw_context.c b/src/gallium/drivers/r600/r600_hw_context.c
+index e67f8d1..75954f8 100644
+--- a/src/gallium/drivers/r600/r600_hw_context.c
++++ b/src/gallium/drivers/r600/r600_hw_context.c
+@@ -739,6 +739,7 @@ void r600_begin_new_cs(struct r600_context *ctx)
+ 	ctx->clip_misc_state.atom.dirty = true;
+ 	ctx->clip_state.atom.dirty = true;
+ 	ctx->db_misc_state.atom.dirty = true;
++	ctx->db_state.atom.dirty = true;
+ 	ctx->framebuffer.atom.dirty = true;
+ 	ctx->poly_offset_state.atom.dirty = true;
+ 	ctx->vgt_state.atom.dirty = true;
+diff --git a/src/gallium/drivers/r600/r600_pipe.c b/src/gallium/drivers/r600/r600_pipe.c
+index 19147d9..4382751 100644
+--- a/src/gallium/drivers/r600/r600_pipe.c
++++ b/src/gallium/drivers/r600/r600_pipe.c
+@@ -1032,6 +1032,16 @@ struct pipe_screen *r600_screen_create(struct radeon_winsys *ws)
+ 	LIST_INITHEAD(&rscreen->fences.blocks);
+ 	pipe_mutex_init(rscreen->fences.mutex);
+ 
++	/* Hyperz leads to lockup on r6xx/r7xx and evergreen, due to this instabilities
++	 * don't enable this by default until we can figure out how to do it properly
++	 *
++	 * You can trigger lockup easily with :
++	 * piglit/bin/depthstencil-render-miplevels 1024 d=s=z24_s8
++	 * run it in a loop, it will lockup often on first run
++	 */
++	rscreen->use_hyperz = debug_get_bool_option("R600_HYPERZ", TRUE);
++	rscreen->use_hyperz = rscreen->info.drm_minor >= 26 ? rscreen->use_hyperz : FALSE;
++
+ 	rscreen->global_pool = compute_memory_pool_new(rscreen);
+ 
+ 	return &rscreen->screen;
+diff --git a/src/gallium/drivers/r600/r600_pipe.h b/src/gallium/drivers/r600/r600_pipe.h
+index c348c76..c52e0e1 100644
+--- a/src/gallium/drivers/r600/r600_pipe.h
++++ b/src/gallium/drivers/r600/r600_pipe.h
+@@ -35,7 +35,7 @@
+ #include "r600_resource.h"
+ #include "evergreen_compute.h"
+ 
+-#define R600_NUM_ATOMS 36
++#define R600_NUM_ATOMS 37
+ 
+ #define R600_MAX_USER_CONST_BUFFERS 1
+ #define R600_MAX_DRIVER_CONST_BUFFERS 2
+@@ -77,15 +77,21 @@ struct r600_command_buffer {
+ 	unsigned pkt_flags;
+ };
+ 
++struct r600_db_state {
++	struct r600_atom		atom;
++	struct r600_surface		*rsurf;
++};
++
+ struct r600_db_misc_state {
+-	struct r600_atom atom;
+-	bool occlusion_query_enabled;
+-	bool flush_depthstencil_through_cb;
+-	bool flush_depthstencil_in_place;
+-	bool copy_depth, copy_stencil;
+-	unsigned copy_sample;
+-	unsigned log_samples;
+-	unsigned db_shader_control;
++	struct r600_atom		atom;
++	bool				occlusion_query_enabled;
++	bool				flush_depthstencil_through_cb;
++	bool				flush_depthstencil_in_place;
++	bool				copy_depth, copy_stencil;
++	unsigned			copy_sample;
++	unsigned			log_samples;
++	unsigned			db_shader_control;
++	bool				htile_clear;
+ };
+ 
+ struct r600_cb_misc_state {
+@@ -220,6 +226,7 @@ struct r600_screen {
+ 	bool				has_streamout;
+ 	bool				has_msaa;
+ 	enum r600_msaa_texture_mode	msaa_texture_support;
++	bool				use_hyperz;
+ 	struct r600_tiling_info		tiling_info;
+ 	struct r600_pipe_fences		fences;
+ 
+@@ -439,6 +446,7 @@ struct r600_context {
+ 	struct r600_clip_misc_state	clip_misc_state;
+ 	struct r600_clip_state		clip_state;
+ 	struct r600_db_misc_state	db_misc_state;
++	struct r600_db_state		db_state;
+ 	struct r600_cso_state		dsa_state;
+ 	struct r600_framebuffer		framebuffer;
+ 	struct r600_poly_offset_state	poly_offset_state;
+diff --git a/src/gallium/drivers/r600/r600_resource.h b/src/gallium/drivers/r600/r600_resource.h
+index 007d5e0..dd0b613 100644
+--- a/src/gallium/drivers/r600/r600_resource.h
++++ b/src/gallium/drivers/r600/r600_resource.h
+@@ -60,6 +60,10 @@ struct r600_texture {
+ 	 * MSAA textures cannot have mipmaps. */
+ 	unsigned			fmask_offset, fmask_size, fmask_bank_height;
+ 	unsigned			cmask_offset, cmask_size, cmask_slice_tile_max;
++
++	struct r600_resource		*htile;
++	/* use htile only for first level */
++	float				depth_clear;
+ };
+ 
+ #define R600_TEX_IS_TILED(tex, level) ((tex)->array_mode[level] != V_038000_ARRAY_LINEAR_GENERAL && (tex)->array_mode[level] != V_038000_ARRAY_LINEAR_ALIGNED)
+@@ -113,6 +117,11 @@ struct r600_surface {
+ 	unsigned db_stencil_info;	/* EG only */
+ 	unsigned db_prefetch_limit;	/* R600 only */
+ 	unsigned pa_su_poly_offset_db_fmt_cntl;
++
++	unsigned			htile_enabled;
++	unsigned			db_htile_surface;
++	unsigned			db_htile_data_base;
++	unsigned			db_preload_control;
+ };
+ 
+ /* Return if the depth format can be read without the DB->CB copy on r6xx-r7xx. */
+diff --git a/src/gallium/drivers/r600/r600_state.c b/src/gallium/drivers/r600/r600_state.c
+index e591d79..0b9aa49 100644
+--- a/src/gallium/drivers/r600/r600_state.c
++++ b/src/gallium/drivers/r600/r600_state.c
+@@ -1440,6 +1440,18 @@ static void r600_init_depth_surface(struct r600_context *rctx,
+ 	default:;
+ 	}
+ 
++	surf->htile_enabled = 0;
++	/* use htile only for first level */
++	if (rtex->htile && !level) {
++		surf->htile_enabled = 1;
++		surf->db_htile_data_base = 0;
++		surf->db_htile_surface = S_028D24_HTILE_WIDTH(1) |
++					S_028D24_HTILE_HEIGHT(1) |
++					S_028D24_LINEAR(1);
++		/* preload is not working properly on r6xx/r7xx */
++		surf->db_depth_info |= S_028010_TILE_SURFACE_ENABLE(1);
++	}
++
+ 	surf->depth_initialized = true;
+ }
+ 
+@@ -1530,6 +1542,16 @@ static void r600_set_framebuffer_state(struct pipe_context *ctx,
+ 			rctx->poly_offset_state.zs_format = state->zsbuf->format;
+ 			rctx->poly_offset_state.atom.dirty = true;
+ 		}
++
++		if (rctx->db_state.rsurf != surf) {
++			rctx->db_state.rsurf = surf;
++			rctx->db_state.atom.dirty = true;
++			rctx->db_misc_state.atom.dirty = true;
++		}
++	} else if (rctx->db_state.rsurf) {
++		rctx->db_state.rsurf = NULL;
++		rctx->db_state.atom.dirty = true;
++		rctx->db_misc_state.atom.dirty = true;
+ 	}
+ 
+ 	if (rctx->cb_misc_state.nr_cbufs != state->nr_cbufs) {
+@@ -1831,13 +1853,32 @@ static void r600_emit_cb_misc_state(struct r600_context *rctx, struct r600_atom
+ 	}
+ }
+ 
++static void r600_emit_db_state(struct r600_context *rctx, struct r600_atom *atom)
++{
++	struct radeon_winsys_cs *cs = rctx->cs;
++	struct r600_db_state *a = (struct r600_db_state*)atom;
++
++	if (a->rsurf && a->rsurf->htile_enabled) {
++		struct r600_texture *rtex = (struct r600_texture *)a->rsurf->base.texture;
++		unsigned reloc_idx;
++
++		r600_write_context_reg(cs, R_02802C_DB_DEPTH_CLEAR, fui(rtex->depth_clear));
++		r600_write_context_reg(cs, R_028D24_DB_HTILE_SURFACE, a->rsurf->db_htile_surface);
++		r600_write_context_reg(cs, R_028014_DB_HTILE_DATA_BASE, a->rsurf->db_htile_data_base);
++		reloc_idx = r600_context_bo_reloc(rctx, rtex->htile, RADEON_USAGE_READWRITE);
++		cs->buf[cs->cdw++] = PKT3(PKT3_NOP, 0, 0);
++		cs->buf[cs->cdw++] = reloc_idx;
++	} else {
++		r600_write_context_reg(cs, R_028D24_DB_HTILE_SURFACE, 0);
++	}
++}
++
+ static void r600_emit_db_misc_state(struct r600_context *rctx, struct r600_atom *atom)
+ {
+ 	struct radeon_winsys_cs *cs = rctx->cs;
+ 	struct r600_db_misc_state *a = (struct r600_db_misc_state*)atom;
+ 	unsigned db_render_control = 0;
+ 	unsigned db_render_override =
+-		S_028D10_FORCE_HIZ_ENABLE(V_028D10_FORCE_DISABLE) |
+ 		S_028D10_FORCE_HIS_ENABLE0(V_028D10_FORCE_DISABLE) |
+ 		S_028D10_FORCE_HIS_ENABLE1(V_028D10_FORCE_DISABLE);
+ 
+@@ -1847,6 +1888,12 @@ static void r600_emit_db_misc_state(struct r600_context *rctx, struct r600_atom
+ 		}
+ 		db_render_override |= S_028D10_NOOP_CULL_DISABLE(1);
+ 	}
++	if (rctx->db_state.rsurf && rctx->db_state.rsurf->htile_enabled) {
++		/* FORCE_OFF means HiZ/HiS are determined by DB_SHADER_CONTROL */
++		db_render_override |= S_028D10_FORCE_HIZ_ENABLE(V_028D10_FORCE_OFF);
++	} else {
++		db_render_override |= S_028D10_FORCE_HIZ_ENABLE(V_028D10_FORCE_DISABLE);
++	}
+ 	if (a->flush_depthstencil_through_cb) {
+ 		assert(a->copy_depth || a->copy_stencil);
+ 
+@@ -1859,6 +1906,10 @@ static void r600_emit_db_misc_state(struct r600_context *rctx, struct r600_atom
+ 				     S_028D0C_STENCIL_COMPRESS_DISABLE(1);
+ 		db_render_override |= S_028D10_NOOP_CULL_DISABLE(1);
+ 	}
++	if (a->htile_clear) {
++		/* FIXME we might want to disable cliprect here */
++		db_render_control |= S_028D0C_DEPTH_CLEAR_ENABLE(1);
++	}
+ 
+ 	r600_write_context_reg_seq(cs, R_028D0C_DB_RENDER_CONTROL, 2);
+ 	r600_write_value(cs, db_render_control); /* R_028D0C_DB_RENDER_CONTROL */
+@@ -2175,6 +2226,7 @@ void r600_init_state_functions(struct r600_context *rctx)
+ 	r600_init_atom(rctx, &rctx->clip_misc_state.atom, id++, r600_emit_clip_misc_state, 6);
+ 	r600_init_atom(rctx, &rctx->clip_state.atom, id++, r600_emit_clip_state, 26);
+ 	r600_init_atom(rctx, &rctx->db_misc_state.atom, id++, r600_emit_db_misc_state, 7);
++	r600_init_atom(rctx, &rctx->db_state.atom, id++, r600_emit_db_state, 11);
+ 	r600_init_atom(rctx, &rctx->dsa_state.atom, id++, r600_emit_cso_state, 0);
+ 	r600_init_atom(rctx, &rctx->poly_offset_state.atom, id++, r600_emit_polygon_offset, 6);
+ 	r600_init_atom(rctx, &rctx->rasterizer_state.atom, id++, r600_emit_cso_state, 0);
+@@ -2530,9 +2582,7 @@ void r600_init_atom_start_cs(struct r600_context *rctx)
+ 
+ 	r600_store_ctl_const(cb, R_03CFF0_SQ_VTX_BASE_VTX_LOC, 0);
+ 
+-	r600_store_context_reg_seq(cb, R_028028_DB_STENCIL_CLEAR, 2);
+-	r600_store_value(cb, 0); /* R_028028_DB_STENCIL_CLEAR */
+-	r600_store_value(cb, 0x3F800000); /* R_02802C_DB_DEPTH_CLEAR */
++	r600_store_context_reg(cb, R_028028_DB_STENCIL_CLEAR, 0);
+ 
+ 	r600_store_context_reg_seq(cb, R_0286DC_SPI_FOG_CNTL, 3);
+ 	r600_store_value(cb, 0); /* R_0286DC_SPI_FOG_CNTL */
+diff --git a/src/gallium/drivers/r600/r600_texture.c b/src/gallium/drivers/r600/r600_texture.c
+index 56e9b64..dc23c5f 100644
+--- a/src/gallium/drivers/r600/r600_texture.c
++++ b/src/gallium/drivers/r600/r600_texture.c
+@@ -438,6 +438,45 @@ r600_texture_create_object(struct pipe_screen *screen,
+ 	/* Tiled depth textures utilize the non-displayable tile order. */
+ 	rtex->non_disp_tiling = rtex->is_depth && rtex->surface.level[0].mode >= RADEON_SURF_MODE_1D;
+ 
++	/* only enable hyperz for PIPE_TEXTURE_2D not for PIPE_TEXTURE_2D_ARRAY
++	 * Thought it might still be interessting to use hyperz for texture
++	 * array without using fast clear features
++	 */
++	rtex->htile = NULL;
++	if (!(base->flags & (R600_RESOURCE_FLAG_TRANSFER | R600_RESOURCE_FLAG_FLUSHED_DEPTH)) &&
++	    util_format_is_depth_or_stencil(base->format) &&
++	    rscreen->use_hyperz &&
++	    rscreen->info.drm_minor >= 14 &&
++	    base->target == PIPE_TEXTURE_2D &&
++	    rtex->surface.level[0].nblk_x >= 32 &&
++	    rtex->surface.level[0].nblk_y >= 32) {
++		unsigned sw = rtex->surface.level[0].nblk_x * rtex->surface.blk_w;
++		unsigned sh = rtex->surface.level[0].nblk_y * rtex->surface.blk_h;
++		unsigned htile_size;
++		unsigned npipes = rscreen->info.r600_num_tile_pipes;
++
++		/* this alignment and htile size only apply to linear htile buffer */
++		sw = align(sw, 16 << 3);
++		sh = align(sh, npipes << 3);
++		htile_size = (sw >> 3) * (sh >> 3) * 4;
++		/* must be aligned with 2K * npipes */
++		htile_size = align(htile_size, (2 << 10) * npipes);
++
++		rtex->htile = (struct r600_resource*)pipe_buffer_create(&rscreen->screen, PIPE_BIND_CUSTOM,
++									PIPE_USAGE_STATIC, htile_size);
++		if (rtex->htile == NULL) {
++			/* this is not a fatal error as we can still keep rendering
++			 * without htile buffer
++			 */
++			R600_ERR("r600: failed to create bo for htile buffers\n");
++		} else {
++			void *ptr;
++			ptr = rscreen->ws->buffer_map(rtex->htile->cs_buf, NULL, PIPE_TRANSFER_WRITE);
++			memset(ptr, 0x0, htile_size);
++			rscreen->ws->buffer_unmap(rtex->htile->cs_buf);
++		}
++	}
++
+ 	/* Now create the backing buffer. */
+ 	if (!buf && alloc_bo) {
+ 		unsigned base_align = rtex->surface.bo_alignment;
+diff --git a/src/gallium/drivers/r600/r600d.h b/src/gallium/drivers/r600/r600d.h
+index 78fa6b6..279955f 100644
+--- a/src/gallium/drivers/r600/r600d.h
++++ b/src/gallium/drivers/r600/r600d.h
+@@ -530,6 +530,7 @@
+ #define   S_028010_ZRANGE_PRECISION(x)                 (((x) & 0x1) << 31)
+ #define   G_028010_ZRANGE_PRECISION(x)                 (((x) >> 31) & 0x1)
+ #define   C_028010_ZRANGE_PRECISION                    0x7FFFFFFF
++#define R_028014_DB_HTILE_DATA_BASE                  0x00028014
+ #define R_028414_CB_BLEND_RED                        0x028414
+ #define   S_028414_BLEND_RED(x)                        (((x) & 0xFFFFFFFF) << 0)
+ #define   G_028414_BLEND_RED(x)                        (((x) >> 0) & 0xFFFFFFFF)
