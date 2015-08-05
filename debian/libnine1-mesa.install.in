@@ -1,2 +1,0 @@
-dri/usr/lib/${DEB_HOST_MULTIARCH}/d3d/d3dadapter9.so.1   usr/lib/${DEB_HOST_MULTIARCH}/d3d
-dri/usr/lib/${DEB_HOST_MULTIARCH}/d3d/d3dadapter9.so.1.0.0   usr/lib/${DEB_HOST_MULTIARCH}/d3d

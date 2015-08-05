@@ -1,3 +1,0 @@
-dri/usr/include/d3dadapter usr/include
-dri/usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/d3d.pc usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig
-dri/usr/lib/${DEB_HOST_MULTIARCH}/d3d/d3dadapter9.so usr/lib/${DEB_HOST_MULTIARCH}/d3d/d3dadapter9.so
