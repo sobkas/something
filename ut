@@ -1,0 +1,5 @@
+#!/bin/sh
+UTPATH=`readlink -f "$0"`
+cd "`dirname "$UTPATH"`"
+LinuxNoEditor/Engine/Binaries/Linux/UE4-Linux-Test UnrealTournament
+
