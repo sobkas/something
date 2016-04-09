@@ -833,8 +833,8 @@
      inkscape:pageopacity="0"
      inkscape:pageshadow="2"
      inkscape:zoom="0.53462947"
-     inkscape:cx="619.24069"
-     inkscape:cy="449.54619"
+     inkscape:cx="703.05067"
+     inkscape:cy="227.51268"
      inkscape:document-units="px"
      inkscape:current-layer="g4857"
      showgrid="false"
@@ -1880,6 +1880,12 @@
        id="path11187"
        d="m 624.89901,-131.27039 a 105.81523,114.93226 0 0 0 -105.81449,114.931362 105.81523,114.93226 0 0 0 0.31088,8.5480776 c 0.12433,8.063e-4 0.24765,0.00484 0.37216,0.00484 l 210.55285,0 a 105.81523,114.93226 0 0 0 0.39458,-8.5529156 105.81523,114.93226 0 0 0 -105.81598,-114.931364 z"
        style="opacity:1;fill:#000000;fill-opacity:1;stroke:#000000;stroke-width:9.29223824;stroke-linecap:butt;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
+    <path
+       sodipodi:nodetypes="scss"
+       inkscape:connector-curvature="0"
+       id="path12126"
+       d="m 629.02882,132.87464 5.63225,0.67404 c 28.85907,-1.24955 -27.23801,172.84322 -22.00246,24.86923 0.65468,-18.50365 9.80469,-26.32899 16.37021,-25.54327 z"
+       style="opacity:1;fill:#303030;fill-opacity:0.27932099;stroke:none;stroke-width:5.39670324;stroke-linecap:butt;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
     <rect
        rx="0"
        ry="46.855034"
@@ -2521,6 +2527,12 @@
        id="path12124"
        d="m 622.87671,381.04239 c -84.94954,10.34406 -72.7286,-5.57372 -80.85321,-19.30911 21.10799,-39.67012 55.6261,-12.58944 69.884,-30.04712 6.22294,-88.33625 20.33475,-139.75835 30.63223,1.44733 2.21847,30.42106 5.24342,44.87611 -19.66302,47.9089 z"
        style="opacity:1;fill:#050505;fill-opacity:0.17592593;stroke:none;stroke-width:5.39670324;stroke-linecap:butt;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
+    <path
+       sodipodi:nodetypes="scss"
+       inkscape:connector-curvature="0"
+       id="path12128"
+       d="m 632.83402,-134.93855 27.33613,3.26977 c 42.38967,41.378844 -231.8187,231.043199 -122.77955,40.717892 17.1436,-29.923742 70.09569,-47.019592 95.44342,-43.987662 z"
+       style="opacity:1;fill:#dadada;fill-opacity:0.16975307;stroke:none;stroke-width:5.39670324;stroke-linecap:butt;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1" />
   </g>
   <g
      inkscape:label="back"
