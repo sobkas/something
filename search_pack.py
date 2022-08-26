@@ -24,7 +24,7 @@ for i in rev:
     if dependancy_dict[i.parent_pkg.name] and apt_pkg.version_compare(dependancy_dict[i.parent_pkg.name][0][0], i.parent_ver.ver_str) < 0:
         print(f"package: {i.parent_pkg.name} comare {dependancy_dict[i.parent_pkg.name][0][0]} {i.parent_ver.ver_str}")
         dependancy_dict[i.parent_pkg.name] = []
-    if dependancy_dict[i.parent_pkg.name] and apt_pkg.version_compare(dependancy_dict[i.parent_pkg.name][0][0], i.parent_ver.ver_str) > 0:
+    if dependancy_dict[i.parent_pkg.name] and apt_pkg.version_compare(dependancy_dict[i.parent_pkg.name][0][0], i.parent_ver.ver_str) >= 0:
         continue
     dependancy_dict[i.parent_pkg.name].append([i.parent_ver.ver_str, temp])
 
